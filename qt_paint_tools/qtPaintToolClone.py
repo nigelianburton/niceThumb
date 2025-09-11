@@ -1,8 +1,10 @@
 """
 Modular Clone Tool Template for NiceThumb
 
-This class implements a self-contained clone tool for use in PaintView.
-It is designed for easy extension and integration with the main UI.
+Enhancement:
+- Right mouse button press while cursor is over the image now forces "Set Source" mode
+  (equivalent to pressing the Set Source button). This lets the user quickly re-pick
+  a new clone source without moving to the options panel.
 
 Features:
 - Provides metadata (name, display flags) for toolbar and UI logic.
@@ -10,13 +12,6 @@ Features:
 - Returns a widget for tool-specific options: "Set Source" button.
 - Responds to mouse events to set source and apply clone stamping.
 - Uses callbacks for cursor updates and stamping, allowing decoupling from canvas internals.
-
-Usage:
-- Instantiate and register with the tool system.
-- Call `on_selected` when the tool is activated, passing current size and callbacks.
-- Call `on_cursor_size_changed` when the brush size changes.
-- Forward mouse events to `on_mouse_event`.
-- Clone tool does NOT require color palette (see returned dict from on_selected).
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -121,43 +116,72 @@ class PaintToolClone(QtCore.QObject):
         # Called on mouse move/press/size change
         if not self._update_cursor_cb or not self._canvas or not hasattr(self._canvas, "_pixmap") or self._canvas._pixmap is None:
             return
-        size = max(8, self._brush_size)
+        display_diam = max(8, self._brush_size)
         composed_img = get_composed_image(self._canvas)
-        pm = None
+        pm: Optional[QtGui.QPixmap] = None
+
+        # Helper to scale circular image to display diameter
+        def to_display_pm(circ_img: QtGui.QImage) -> QtGui.QPixmap:
+            return QtGui.QPixmap.fromImage(
+                circ_img.scaled(display_diam, display_diam,
+                                QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                                QtCore.Qt.TransformationMode.SmoothTransformation)
+            )
+
         if self._mode == "set_source":
-            # Show patch at mouse with cross
             if pos is None:
                 pos = self._last_mouse
             if composed_img is not None and pos is not None:
+                # Use image-space diameter for correct sampling (no zoom)
+                geom = get_brush_geometry(self._canvas, pos, self._brush_size)
+                scale, dia_img, rad_img, _ = geom
                 img_pt = self._canvas._map_widget_to_image(pos)
-                circ = make_circular_patch(composed_img, img_pt, size, border_color=QtGui.QColor("black"), border_width=2)
-                pm = QtGui.QPixmap.fromImage(circ)
-                painter = QtGui.QPainter(pm)
-                pen_cross = QtGui.QPen(QtGui.QColor(0, 0, 0), 2)
-                painter.setPen(pen_cross)
-                painter.drawLine(size // 2, 0, size // 2, size)
-                painter.drawLine(0, size // 2, size, size // 2)
-                painter.end()
-            else:
-                pm = make_brush_cursor(size, QtGui.QColor("black"), border_color=QtGui.QColor("black"), border_width=2, cross=True)
+                if img_pt is not None and None not in geom:
+                    circ = make_circular_patch(
+                        composed_img,
+                        img_pt,
+                        dia_img,
+                        border_color=QtGui.QColor("black"),
+                        border_width=2
+                    )
+                    pm = to_display_pm(circ)
+                    # draw cross overlay for "set source"
+                    painter = QtGui.QPainter(pm)
+                    pen_cross = QtGui.QPen(QtGui.QColor(0, 0, 0), 2)
+                    painter.setPen(pen_cross)
+                    painter.drawLine(display_diam // 2, 0, display_diam // 2, display_diam)
+                    painter.drawLine(0, display_diam // 2, display_diam, display_diam // 2)
+                    painter.end()
+            if pm is None:
+                pm = make_brush_cursor(display_diam, QtGui.QColor("black"), border_color=QtGui.QColor("black"), border_width=2, cross=True)
+
         elif self._mode == "clone" and self._source_point is not None:
-            # Show patch at source offset by drag delta
             if pos is None:
                 pos = self._last_mouse
             if composed_img is not None and pos is not None:
+                geom = get_brush_geometry(self._canvas, pos, self._brush_size)
+                scale, dia_img, rad_img, _ = geom
                 img_pt = self._canvas._map_widget_to_image(pos)
-                if self._dragging and self._drag_start is not None:
-                    delta = QtCore.QPointF(img_pt.x() - self._drag_start.x(), img_pt.y() - self._drag_start.y())
-                else:
-                    delta = QtCore.QPointF(0, 0)
-                sample_center = QtCore.QPointF(self._source_point.x() + delta.x(), self._source_point.y() + delta.y())
-                circ = make_circular_patch(composed_img, sample_center, size, border_color=QtGui.QColor("black"), border_width=2)
-                pm = QtGui.QPixmap.fromImage(circ)
-            else:
-                pm = make_brush_cursor(size, QtGui.QColor("black"), border_color=QtGui.QColor("black"), border_width=2)
+                if img_pt is not None and None not in geom:
+                    if self._dragging and self._drag_start is not None:
+                        delta = QtCore.QPointF(img_pt.x() - self._drag_start.x(), img_pt.y() - self._drag_start.y())
+                    else:
+                        delta = QtCore.QPointF(0, 0)
+                    sample_center = QtCore.QPointF(self._source_point.x() + delta.x(), self._source_point.y() + delta.y())
+                    circ = make_circular_patch(
+                        composed_img,
+                        sample_center,
+                        dia_img,
+                        border_color=QtGui.QColor("black"),
+                        border_width=2
+                    )
+                    pm = to_display_pm(circ)
+            if pm is None:
+                pm = make_brush_cursor(display_diam, QtGui.QColor("black"), border_color=QtGui.QColor("black"), border_width=2)
         else:
-            pm = make_brush_cursor(size, QtGui.QColor("black"), border_color=QtGui.QColor("black"), border_width=2)
-        self._update_cursor_cb(pm, size // 2, size // 2)
+            pm = make_brush_cursor(display_diam, QtGui.QColor("black"), border_color=QtGui.QColor("black"), border_width=2)
+
+        self._update_cursor_cb(pm, display_diam // 2, display_diam // 2)
 
     def on_mouse_event(
         self,
@@ -167,6 +191,25 @@ class PaintToolClone(QtCore.QObject):
         right_down: bool
     ):
         self._last_mouse = pos
+
+        # NEW: Right-click anywhere over the image enters set-source mode immediately.
+        if event_type == "press" and right_down:
+            # Confirm cursor is over image (valid image-space point)
+            if self._canvas and self._canvas._map_widget_to_image(pos) is not None:
+                self._mode = "set_source"
+                self._source_point = None
+                self._drag_start = None
+                self._dragging = False
+                if self._btn_set_source:
+                    # Ensure button reflects state
+                    if not self._btn_set_source.isChecked():
+                        block = self._btn_set_source.blockSignals(True)
+                        self._btn_set_source.setChecked(True)
+                        self._btn_set_source.blockSignals(block)
+                    self._btn_set_source.setEnabled(True)
+                self._update_cursor(pos)
+                return  # Do not fall through to clone logic
+
         if self._mode == "set_source":
             self._update_cursor(pos)
             if event_type == "press" and left_down:

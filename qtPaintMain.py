@@ -3,18 +3,12 @@ NiceThumb PaintView (Modular, Tool-Driven)
 
 Drop-in replacement for qtPaint.py. Integrates modular tool classes (Paint, Mask, Blur, Clone, Diffuse).
 UI, toolbar, canvas, and tool switching logic are preserved. All helper methods are self-contained.
-
-Features:
-- Toolbar: brush controls, palette, tool chooser, tool options, actions.
-- Canvas: image + overlay painting/editing.
-- Tool system: modular, callback-driven, supports error/busy/save events.
-- Cursor preview and stamping logic.
-- Mouse event dispatch to active tool.
 """
 
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Callable, Any
+import time  # needed by next_edit_filename
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -43,7 +37,6 @@ def compose_images(base: QtGui.QImage, overlay: Optional[QtGui.QImage]) -> QtGui
     return out
 
 def next_edit_filename(src: Path) -> Path:
-    # Simple version: add _editN before extension
     stem, ext = src.stem, src.suffix
     parent = src.parent
     for i in range(1, 1000):
@@ -58,7 +51,7 @@ def draw_brush_preview(sprite: QtGui.QPixmap, size: int, color: QtGui.QColor) ->
     painter = QtGui.QPainter(pm)
     painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
     painter.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
-    pen = QtGui.Qpen(QtGui.QColor("#444444"))
+    pen = QtGui.QPen(QtGui.QColor("#444444"))
     pen.setWidth(1)
     painter.setPen(pen)
     painter.setBrush(color)
@@ -74,6 +67,7 @@ TOOL_OPTIONS_MIN_W = int(320 * 1.6)
 BRUSH_PREVIEW_SIZE_PX = 92
 BRUSH_MIN = 2
 BRUSH_MAX = 92
+BRUSH_WHEEL_STEP = 4  # Mouse wheel step size (px) when over the image
 PALETTE: List[str] = [
     "#FF0000", "#00FF0000", "#0000FF", "#FFFF00", "#FFFFFF", "#000000", "#808080", "#FFA500",
     "#800080", "#A52A2A", "#008080", "#FFC0CB", "#00FFFF", "#FF00FF", "#40E0D0", "#E6E6FA",
@@ -111,6 +105,9 @@ class PaintView(QtWidgets.QWidget):
             "select": PaintToolSelection(),
             "diffuse": PaintToolDiffuse(),
         }
+        # Force default Paint tool active on creation
+        self.tools_widget.set_active("Paint")
+        self._on_tool_selected("Paint")
 
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
@@ -123,7 +120,6 @@ class PaintView(QtWidgets.QWidget):
         tlay.setContentsMargins(6, 6, 6, 6)
         tlay.setSpacing(12)
 
-        # Brush controls
         self.brush_controls = BrushControlsWidget(
             initial_size=self._brush_size,
             min_size=BRUSH_MIN,
@@ -132,15 +128,12 @@ class PaintView(QtWidgets.QWidget):
         )
         self.brush_controls.sizeChanged.connect(self._on_brush_size_changed)
 
-        # Palette
         self.palette_widget = PaletteWidget(PALETTE)
         self.palette_widget.colorSelected.connect(self._on_brush_color_changed)
 
-        # Tool chooser
         self.tools_widget = ToolsWidget(["Paint", "Mask", "Blur", "Clone", "Select", "Diffuse"])
         self.tools_widget.toolSelected.connect(self._on_tool_selected)
 
-        # Tool options
         self.tool_options_box = QtWidgets.QGroupBox("Tool Options")
         self.tool_options_box.setMinimumWidth(TOOL_OPTIONS_MIN_W)
         to_lay = QtWidgets.QVBoxLayout(self.tool_options_box)
@@ -149,16 +142,13 @@ class PaintView(QtWidgets.QWidget):
         self.tool_options_stack = QtWidgets.QStackedWidget()
         to_lay.addWidget(self.tool_options_stack)
 
-        # Empty page
         self.page_empty = QtWidgets.QWidget()
         self.tool_options_stack.addWidget(self.page_empty)
 
-        # Actions
         self.actions_widget = ActionsWidget()
         self.actions_widget.saveRequested.connect(self._save_current)
         self.actions_widget.cancelRequested.connect(self._cancel_edit)
 
-        # Add widgets to toolbar
         tlay.addWidget(self.tools_widget)
         tlay.addWidget(self.brush_controls)
         tlay.addWidget(self.tool_options_box, 1)
@@ -166,16 +156,14 @@ class PaintView(QtWidgets.QWidget):
         tlay.addWidget(self.actions_widget)
         tlay.addStretch(1)
 
-        # Canvas
         self.image_canvas = PaintCanvas()
         self.image_canvas.setMouseTracking(True)
         self.image_canvas.mouseEventCallback = self._on_canvas_mouse_event
+        self.image_canvas.installEventFilter(self)
 
-        # Layout
         root.addWidget(toolbar, 0)
         root.addWidget(self.image_canvas, 1)
 
-        # Initial state and preview wiring
         self._update_brush_preview()
 
     def set_path(self, path: Optional[Path]):
@@ -190,9 +178,9 @@ class PaintView(QtWidgets.QWidget):
             return
         self._orig_pixmap = pix
         self.image_canvas.set_pixmap(self._orig_pixmap)
-        # Do NOT force tool to Paint here!
-        # self.tools_widget.set_active("paint")
-        # self._on_tool_selected("paint")
+        # Force default Paint tool each time edit mode (image) is entered
+        self.tools_widget.set_active("Paint")
+        self._on_tool_selected("Paint")
 
     def _on_tool_selected(self, name: str):
         # Auto-commit selection sprite if leaving selection tool
@@ -304,6 +292,7 @@ class PaintView(QtWidgets.QWidget):
         self._update_brush_preview()
 
     def _on_brush_color_changed(self, color: QtGui.QColor):
+        # External palette sets global color; persist across tools
         self._brush_color = QtGui.QColor(color)
         if self._active_tool_obj and hasattr(self._active_tool_obj, "on_color_changed"):
             self._active_tool_obj.on_color_changed(color)
@@ -311,7 +300,6 @@ class PaintView(QtWidgets.QWidget):
 
     def _set_cursor_sprite(self, pm: QtGui.QPixmap, hot_x: int, hot_y: int):
         self.image_canvas.setCursor(QtGui.QCursor(pm, hot_x, hot_y))
-        # Also update the brush preview in the toolbox
         self.brush_controls.set_preview_pixmap(pm)
 
     def _on_canvas_mouse_event(self, event_type: str, pos: QtCore.QPoint, left_down: bool, right_down: bool):
@@ -487,4 +475,36 @@ class PaintView(QtWidgets.QWidget):
             self.saved.emit(out_path)
             if self._active_tool == "diffuse":
                 self.diffused.emit(out_path)
-        
+        elif event == "color":
+            # Persist picked/palette color as global brush color across tool switches & size changes
+            if isinstance(value, QtGui.QColor):
+                self._brush_color = QtGui.QColor(value)
+            else:
+                self._brush_color = QtGui.QColor(str(value))
+            # Update active paint tool if needed
+            if self._active_tool == "paint" and self._active_tool_obj and hasattr(self._active_tool_obj, "on_color_changed"):
+                self._active_tool_obj.on_color_changed(self._brush_color)
+            self._update_brush_preview()
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if obj is self.image_canvas and event.type() == QtCore.QEvent.Type.Wheel:
+            try:
+                frame = self.image_canvas._fit_rect()
+                posf = event.position()
+                if isinstance(posf, QtCore.QPointF) and not frame.contains(posf):
+                    return super().eventFilter(obj, event)
+            except Exception:
+                pass
+            dy = 0
+            try:
+                dy = event.angleDelta().y() or event.pixelDelta().y()
+            except Exception:
+                dy = 0
+            if dy != 0:
+                sign = 1 if dy > 0 else -1
+                new_size = max(BRUSH_MIN, min(BRUSH_MAX, int(self._brush_size + sign * BRUSH_WHEEL_STEP)))
+                if new_size != self._brush_size:
+                    self.brush_controls.set_size(new_size)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)

@@ -176,6 +176,7 @@ class PaintToolBlur(QtCore.QObject):
         img_pt = self._canvas._map_widget_to_image(pos)
         if composed_img is None or img_pt is None or None in geom:
             return
+        # Sample in image space (dia_img) for correct, non-zoomed content
         patch = composed_img.copy(
             int(img_pt.x() - rad_img),
             int(img_pt.y() - rad_img),
@@ -183,8 +184,18 @@ class PaintToolBlur(QtCore.QObject):
             int(dia_img)
         )
         blurred = blur_qimage_gaussian(patch, self._blur_strength)
-        size = max(8, self._brush_size)
-        circ = make_circular_patch(blurred, QtCore.QPointF(blurred.width()/2, blurred.height()/2),
-                                   size, border_color=QtGui.QColor("black"), border_width=2)
-        pm = QtGui.QPixmap.fromImage(circ)
-        self._update_cursor_cb(pm, size // 2, size // 2)
+        # Build circular image at image-space diameter, then scale to display diameter for cursor
+        display_diam = max(8, self._brush_size)
+        circ_img = make_circular_patch(
+            blurred,
+            QtCore.QPointF(blurred.width() / 2, blurred.height() / 2),
+            dia_img,
+            border_color=QtGui.QColor("black"),
+            border_width=2
+        )
+        pm = QtGui.QPixmap.fromImage(
+            circ_img.scaled(display_diam, display_diam,
+                            QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                            QtCore.Qt.TransformationMode.SmoothTransformation)
+        )
+        self._update_cursor_cb(pm, display_diam // 2, display_diam // 2)

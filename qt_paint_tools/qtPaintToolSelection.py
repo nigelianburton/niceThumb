@@ -1,18 +1,12 @@
-"""
-Modular Selection Tool Template for NiceThumb
+﻿"""
+Selection Tool with proper rotation handling.
 
-Implements a self-contained selection tool and state for use in PaintView.
-Features:
-- Rectangle selection, drag, erase submode, marching ants.
-- Floating sprite for selection area.
-- Provides metadata for toolbar and UI logic.
-- Handles mouse events, overlay painting, and cursor.
-- No external dependencies except Qt.
-
-Usage:
-- Instantiate and register with the tool system.
-- Call `on_selected` when the tool is activated, passing canvas and callbacks.
-- Forward mouse events to `on_mouse_event`.
+Changes:
+- Remembers original (base) selection rect & sprite at time of capture.
+- Tracks cumulative rotation (rotation_deg).
+- On RotR / RotL: rebuilds rotated sprite from the unmodified base sprite (no progressive shrink).
+- Computes new marching-ants bounding box using trigonometry (|w*cosθ|+|h*sinθ| etc.), keeps center constant.
+- Updates rect_img to rotated bounding box, so no scaling of the rotated image occurs.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -20,6 +14,8 @@ from typing import Optional, Callable
 from qt_paint_tools.qtPaintToolUtilities import (
     ToolPaletteWidget, PALETTE, blur_qimage_gaussian
 )
+import math
+
 
 class SelectionState(QtCore.QObject):
     activeChanged = QtCore.pyqtSignal(bool)
@@ -30,13 +26,18 @@ class SelectionState(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.active = False
-        self.rect_img = QtCore.QRectF()
-        self.sprite: Optional[QtGui.QImage] = None
+        self.rect_img = QtCore.QRectF()          # current (possibly rotated) bounding box (image space)
+        self.sprite: Optional[QtGui.QImage] = None       # current (possibly rotated) sprite
         self.defining = False
         self.dragging = False
         self.drag_delta = QtCore.QPointF()
         self.ants_phase = 0
         self.mode = "edit"
+        # Rotation state
+        self.base_rect_img = QtCore.QRectF()     # original, un-rotated selection rect (image space)
+        self.base_sprite: Optional[QtGui.QImage] = None  # original, un-rotated sprite
+        self.rotation_deg: float = 0.0           # cumulative rotation from base (degrees)
+
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(120)
@@ -53,6 +54,7 @@ class SelectionState(QtCore.QObject):
         if m != self.mode:
             self.mode = m
             self.modeChanged.emit(m)
+
 
 class PaintToolSelection(QtCore.QObject):
     name = "select"
@@ -71,6 +73,7 @@ class PaintToolSelection(QtCore.QObject):
     def button_name(self) -> str:
         return "Select"
 
+    # ---------------- UI -----------------
     def create_options_widget(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         main_layout = QtWidgets.QHBoxLayout(widget)
@@ -95,7 +98,6 @@ class PaintToolSelection(QtCore.QObject):
         rb_row.addWidget(self.rb_erase)
         options_col.addLayout(rb_row)
 
-        # Action buttons (added Commit + Clear)
         row1 = QtWidgets.QHBoxLayout()
         row2 = QtWidgets.QHBoxLayout()
         self._select_action_buttons = []
@@ -130,6 +132,7 @@ class PaintToolSelection(QtCore.QObject):
         if self._tool_callback:
             self._tool_callback("color", color)
 
+    # ------------- Lifecycle --------------
     def on_selected(
         self,
         canvas,
@@ -139,7 +142,6 @@ class PaintToolSelection(QtCore.QObject):
         tool_callback: Optional[Callable[[str, str | bool], None]] = None,
         **kwargs
     ) -> dict:
-        # Commit any previous floating sprite automatically when re-entering
         if self._canvas and self._state.sprite is not None and not self._state.sprite.isNull() and self._state.active:
             self._commit_sprite_to_overlay(self._canvas)
         self._canvas = canvas
@@ -148,12 +150,15 @@ class PaintToolSelection(QtCore.QObject):
         self._state.activeChanged.connect(lambda active: self.rb_erase.setEnabled(active))
         if update_cursor_cb:
             canvas.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.CrossCursor))
-        # Reset state (do NOT clear palette color)
-        self._state.active = False
-        self._state.defining = False
-        self._state.dragging = False
-        self._state.rect_img = QtCore.QRectF()
-        self._state.sprite = None
+        s = self._state
+        s.active = False
+        s.defining = False
+        s.dragging = False
+        s.rect_img = QtCore.QRectF()
+        s.sprite = None
+        s.base_rect_img = QtCore.QRectF()
+        s.base_sprite = None
+        s.rotation_deg = 0.0
         return {
             "display_brush_controls": self.display_brush_controls,
             "display_palette": self.display_palette,
@@ -162,18 +167,12 @@ class PaintToolSelection(QtCore.QObject):
         }
 
     def on_deselected(self):
-        # Auto-commit on tool exit
-        if self._canvas and self._state.sprite is not None and not self._state.sprite.isNull() and self._state.active:
+        s = self._state
+        if self._canvas and s.sprite is not None and not s.sprite.isNull() and s.active:
             self._commit_sprite_to_overlay(self._canvas)
-        # Do not nuke selection rectangle so user sees final state if returning.
 
-    def on_mouse_event(
-        self,
-        event_type: str,
-        pos: QtCore.QPoint,
-        left_down: bool,
-        right_down: bool
-    ):
+    # ------------- Mouse ------------------
+    def on_mouse_event(self, event_type: str, pos: QtCore.QPoint, left_down: bool, right_down: bool):
         canvas = self._canvas
         s = self._state
         img_ptf = canvas._map_widget_to_image(pos)
@@ -181,7 +180,6 @@ class PaintToolSelection(QtCore.QObject):
             img_ptf is not None and s.active and not s.rect_img.isNull() and s.rect_img.contains(img_ptf)
         )
 
-        # Cursor logic
         if hasattr(canvas, "setCursor"):
             if s.dragging:
                 canvas.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.ClosedHandCursor))
@@ -193,23 +191,22 @@ class PaintToolSelection(QtCore.QObject):
         if event_type == "press":
             if left_down and img_ptf is not None:
                 if s.active and hover_in_sel:
-                    # Ensure sprite exists before dragging
                     if s.sprite is None or s.sprite.isNull():
                         self._update_sprite(canvas)
                     s.dragging = True
                     s.defining = False
                     s.drag_delta = img_ptf - s.rect_img.topLeft()
-                    print(f"[PaintToolSelection] Begin drag selection at {img_ptf.x():.1f},{img_ptf.y():.1f}")
                 else:
-                    # Commit previous floating sprite if starting a brand new selection
                     if s.active and s.sprite is not None and not s.sprite.isNull():
                         self._commit_sprite_to_overlay(canvas)
-                    print(f"[PaintToolSelection] Begin marching ants at {img_ptf.x():.1f},{img_ptf.y():.1f}")
                     s.defining = True
                     s.dragging = False
                     s.active = False
                     s.rect_img = QtCore.QRectF(img_ptf, img_ptf)
                     s.sprite = None
+                    s.base_rect_img = QtCore.QRectF()
+                    s.base_sprite = None
+                    s.rotation_deg = 0.0
                     s.activeChanged.emit(False)
             canvas.update()
 
@@ -241,21 +238,22 @@ class PaintToolSelection(QtCore.QObject):
                     if s.rect_img.width() > 2 and s.rect_img.height() > 2:
                         s.active = True
                         s.activeChanged.emit(True)
-                        self._update_sprite(canvas)
+                        self._update_sprite(canvas)  # capture base sprite
                     else:
                         s.active = False
                         s.rect_img = QtCore.QRectF()
                         s.sprite = None
+                        s.base_rect_img = QtCore.QRectF()
+                        s.base_sprite = None
+                        s.rotation_deg = 0.0
                 elif s.dragging:
                     s.dragging = False
             canvas.update()
 
     def cursorFor(self, canvas) -> Optional[QtGui.QCursor]:
-        s = self._state
-        if s.dragging:
-            return QtGui.QCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-        return QtGui.QCursor(QtCore.Qt.CursorShape.CrossCursor)
+        return QtGui.QCursor(QtCore.Qt.CursorShape.ClosedHandCursor) if self._state.dragging else QtGui.QCursor(QtCore.Qt.CursorShape.CrossCursor)
 
+    # ------------- Painting ---------------
     def paintOverlay(self, canvas, painter: QtGui.QPainter):
         s = self._state
         if canvas._pixmap is None or canvas._pixmap.isNull() or s.rect_img.isNull():
@@ -263,6 +261,8 @@ class PaintToolSelection(QtCore.QObject):
         frame = canvas._fit_rect()
         sx = frame.width() / canvas._pixmap.width()
         sy = frame.height() / canvas._pixmap.height()
+
+        # Rect (image space) -> display space
         tl = s.rect_img.topLeft()
         rect_disp = QtCore.QRectF(
             frame.x() + tl.x() * sx,
@@ -271,13 +271,16 @@ class PaintToolSelection(QtCore.QObject):
             s.rect_img.height() * sy,
         )
 
-        # Draw floating sprite (if present)
+        # Draw sprite WITHOUT scaling (since rect_img is bounding box of current sprite size)
         if s.sprite is not None and not s.sprite.isNull():
-            # Scale sprite into display rect
-            painter.setOpacity(1.0)
-            painter.drawImage(rect_disp, s.sprite)
+            if abs(s.sprite.width() - s.rect_img.width()) < 0.5 and abs(s.sprite.height() - s.rect_img.height()) < 0.5:
+                # sizes match bounding box: simple draw (scaled only by image->display factors)
+                painter.drawImage(rect_disp, s.sprite)
+            else:
+                # Fallback (should not happen unless state inconsistent)
+                painter.drawImage(rect_disp, s.sprite)
 
-        # Draw marching ants on top
+        # Marching ants
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         ants_w = QtGui.QPen(QtGui.QColor(255, 255, 255), 1, QtCore.Qt.PenStyle.CustomDashLine)
         ants_w.setDashPattern([6, 6]); ants_w.setDashOffset(s.ants_phase)
@@ -286,8 +289,7 @@ class PaintToolSelection(QtCore.QObject):
         ants_b.setDashPattern([6, 6]); ants_b.setDashOffset((s.ants_phase + 6) % 12)
         painter.setPen(ants_b); painter.drawRect(rect_disp)
 
-    # --- Sprite Helpers ---------------------------------------------------------
-
+    # ------------- Sprite Helpers ---------
     def _update_sprite(self, canvas):
         s = self._state
         if not canvas._pixmap or s.rect_img.isNull():
@@ -306,6 +308,10 @@ class PaintToolSelection(QtCore.QObject):
             painter.drawImage(0, 0, ov)
             painter.end()
         s.sprite = base_region
+        # Initialize base snapshot for future rotations
+        s.base_sprite = base_region.copy()
+        s.base_rect_img = QtCore.QRectF(s.rect_img)
+        s.rotation_deg = 0.0
         s.changed.emit()
 
     def _commit_sprite_to_overlay(self, canvas):
@@ -323,10 +329,54 @@ class PaintToolSelection(QtCore.QObject):
         p.drawImage(top_left, s.sprite)
         p.end()
         s.sprite = None
+        s.base_sprite = None
+        s.base_rect_img = QtCore.QRectF()
+        s.rotation_deg = 0.0
         s.changed.emit()
 
-    # --- Actions ----------------------------------------------------------------
+    # ------------- Rotation Logic ----------
+    def _apply_rotation(self, delta_deg: float):
+        s = self._state
+        if s.base_sprite is None or s.base_sprite.isNull():
+            # If no base recorded yet, treat current sprite as base
+            if s.sprite is None or s.sprite.isNull():
+                return
+            s.base_sprite = s.sprite.copy()
+            if s.base_rect_img.isNull():
+                s.base_rect_img = QtCore.QRectF(s.rect_img)
+            s.rotation_deg = 0.0
 
+        s.rotation_deg = (s.rotation_deg + delta_deg) % 360.0
+
+        # Rebuild rotated sprite from base
+        tr = QtGui.QTransform()
+        tr.rotate(s.rotation_deg)
+        rotated = s.base_sprite.transformed(tr, QtCore.Qt.TransformationMode.SmoothTransformation)
+
+        # Compute new bounding box (image space) using trig so rect encloses rotated base rect
+        w = s.base_rect_img.width()
+        h = s.base_rect_img.height()
+        theta = math.radians(s.rotation_deg)
+        new_w = abs(w * math.cos(theta)) + abs(h * math.sin(theta))
+        new_h = abs(w * math.sin(theta)) + abs(h * math.cos(theta))
+
+        # Keep center constant
+        center = s.rect_img.center() if not s.rect_img.isNull() else s.base_rect_img.center()
+
+        # Adjust rect to new size, centered
+        s.rect_img = QtCore.QRectF(center.x() - new_w / 2.0, center.y() - new_h / 2.0, new_w, new_h)
+
+        # Ensure rotated sprite size matches bounding box: rotated already has its own size = math bounding box of rotation
+        # Just use rotated directly; its width/height equals its own bounding box; we align centers.
+        # Need to re-center rotated sprite if its size differs from computed new_w/new_h due to rounding.
+        s.sprite = rotated
+
+        s.rectChanged.emit(s.rect_img)
+        s.changed.emit()
+        if self._canvas:
+            self._canvas.update()
+
+    # ------------- Actions -----------------
     def _apply_select_action(self, action: str):
         a = (action or "").lower()
         if not self._canvas:
@@ -337,6 +387,9 @@ class PaintToolSelection(QtCore.QObject):
             s.active = False
             s.rect_img = QtCore.QRectF()
             s.sprite = None
+            s.base_sprite = None
+            s.base_rect_img = QtCore.QRectF()
+            s.rotation_deg = 0.0
             s.defining = False
             s.dragging = False
             s.activeChanged.emit(False)
@@ -346,11 +399,9 @@ class PaintToolSelection(QtCore.QObject):
 
         if a == "commit":
             self._commit_sprite_to_overlay(self._canvas)
-            # Leave selection rectangle so user can re-capture if desired
             self._canvas.update()
             return
 
-        # Operate directly on floating sprite if present
         if s.sprite is not None and not s.sprite.isNull():
             if a == "fill":
                 fill_color = self._last_palette_color
@@ -360,14 +411,20 @@ class PaintToolSelection(QtCore.QObject):
                 p.end()
             elif a == "blur":
                 s.sprite = blur_qimage_gaussian(s.sprite, 6.0)
-            elif a in ("rotr", "rotl"):
-                ang = 10 if a == "rotr" else -10
-                tr = QtGui.QTransform()
-                tr.rotate(ang)
-                s.sprite = s.sprite.transformed(tr, QtCore.Qt.TransformationMode.SmoothTransformation)
+            elif a == "rotr":
+                self._apply_rotation(10.0)
+                return
+            elif a == "rotl":
+                self._apply_rotation(-10.0)
+                return
             elif a == "fliph":
+                # Mirror base sprite to maintain correct future rotations
+                if s.base_sprite is not None and not s.base_sprite.isNull():
+                    s.base_sprite = s.base_sprite.mirrored(True, False)
                 s.sprite = s.sprite.mirrored(True, False)
             elif a == "flipv":
+                if s.base_sprite is not None and not s.base_sprite.isNull():
+                    s.base_sprite = s.base_sprite.mirrored(False, True)
                 s.sprite = s.sprite.mirrored(False, True)
             elif a == "cropsave":
                 self._crop_save_selection()
@@ -377,7 +434,7 @@ class PaintToolSelection(QtCore.QObject):
             self._canvas.update()
             return
 
-        # Fallback legacy operations if no sprite
+        # Legacy fallbacks
         if not hasattr(self._canvas, "_sel_state"):
             return
         if a == "fill":
@@ -398,5 +455,5 @@ class PaintToolSelection(QtCore.QObject):
             QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), f"Unknown: {action}")
 
     def _crop_save_selection(self):
-        # (unchanged legacy path�relies on next_edit_filename existing elsewhere)
+        # Placeholder (unchanged legacy hook)
         pass
