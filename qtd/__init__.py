@@ -1,0 +1,1 @@
+# Makes 'qtd' a package so relative imports in qtdServer.py work when run via 'python -m qtd.qtdServer'
