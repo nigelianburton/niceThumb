@@ -364,3 +364,4 @@ FodyWeavers.xsd
 /Qwen-Image-Lightning
 /DFloat11__Qwen-Image-Edit-DF11/diffusion_pytorch_model.safetensors
 /outputs
+/qt_paint_tools/qtPaintPageSize.py
