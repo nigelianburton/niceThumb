@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modular Diffuse Tool for NiceThumb (Template-based)
 
 This class implements a self-contained diffusion tool for PaintView.
@@ -809,14 +809,30 @@ class PaintToolDiffuse(QtCore.QObject):
         return QtGui.QIcon(pm)
 
     def _set_busy(self, busy: bool):
+        """
+        Narrowed: only disable T2I / I2I run buttons during a job.
+        Other controls remain usable (e.g., user can adjust prompt/params while generation runs).
+        Progress label & bar stay enabled.
+        """
         if self._tool_callback:
             self._tool_callback("busy", busy)
-        for w in (
-            self.btn_t2i, self.btn_i2i, self.te_prompt, self.cbo_model,
-            self.cb_qwen, self.sl_guidance, self.sl_steps, self.sl_strength,
-            self.sl_q_truecfg, self.sl_q_steps, self.cb_lock_seed, self.sp_seed
-        ):
-            w.setEnabled(not busy)
+
+        # Only run buttons are disabled
+        for w in (self.btn_t2i, self.btn_i2i):
+            try:
+                w.setEnabled(not busy)
+            except Exception:
+                pass
+
+        # Ensure progress UI always enabled
+        try:
+            if self.pb_progress:
+                self.pb_progress.setEnabled(True)
+            if self.lbl_stage:
+                self.lbl_stage.setEnabled(True)
+        except Exception:
+            pass
+
         if busy:
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.BusyCursor)
         else:

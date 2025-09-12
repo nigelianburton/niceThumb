@@ -1,8 +1,7 @@
-"""
+﻿"""
 NiceThumb PaintView (Modular, Tool-Driven)
 
-Drop-in replacement for qtPaint.py. Integrates modular tool classes (Paint, Mask, Blur, Clone, Diffuse).
-UI, toolbar, canvas, and tool switching logic are preserved. All helper methods are self-contained.
+Drop-in replacement for qtPaint.py. Integrates modular tool classes (Paint, Mask, Blur, Clone, Diffuse, Size).
 """
 
 from __future__ import annotations
@@ -19,21 +18,22 @@ from qt_paint_tools.qtPaintToolBlur import PaintToolBlur
 from qt_paint_tools.qtPaintToolClone import PaintToolClone
 from qt_paint_tools.qtPaintToolD import PaintToolDiffuse
 from qt_paint_tools.qtPaintToolSelection import PaintToolSelection
+from qt_paint_tools.qtPaintToolPageSize import PaintToolPageSize  # <-- ADDED
 
 from qtPaintWidgets import BrushControlsWidget, PaletteWidget, ToolsWidget, ActionsWidget
 from qtPaintCanvas import PaintCanvas
 
-# --- Self-contained helpers (copied from qtPaint.py) ---
+# --- Self-contained helpers ---
 def compose_images(base: QtGui.QImage, overlay: Optional[QtGui.QImage]) -> QtGui.QImage:
     if overlay is None or overlay.isNull():
         return base.copy()
     out = QtGui.QImage(base.size(), base.format())
     out.fill(0)
-    painter = QtGui.QPainter(out)
-    painter.drawImage(0, 0, base)
-    painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
-    painter.drawImage(0, 0, overlay)
-    painter.end()
+    p = QtGui.QPainter(out)
+    p.drawImage(0, 0, base)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
+    p.drawImage(0, 0, overlay)
+    p.end()
     return out
 
 def next_edit_filename(src: Path) -> Path:
@@ -51,13 +51,12 @@ def draw_brush_preview(sprite: QtGui.QPixmap, size: int, color: QtGui.QColor) ->
     painter = QtGui.QPainter(pm)
     painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
     painter.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
-    pen = QtGui.QPen(QtGui.QColor("#444444"))
-    pen.setWidth(1)
+    pen = QtGui.QPen(QtGui.QColor("#444444")); pen.setWidth(1)
     painter.setPen(pen)
     painter.setBrush(color)
     r = max(2, min(sprite.width(), size - 6))
-    cx = cy = size // 2
-    painter.drawEllipse(QtCore.QPointF(cx, cy), r / 2.0, r / 2.0)
+    c = size // 2
+    painter.drawEllipse(QtCore.QPointF(c, c), r / 2.0, r / 2.0)
     painter.end()
     return pm
 
@@ -67,7 +66,7 @@ TOOL_OPTIONS_MIN_W = int(320 * 1.6)
 BRUSH_PREVIEW_SIZE_PX = 92
 BRUSH_MIN = 2
 BRUSH_MAX = 92
-BRUSH_WHEEL_STEP = 4  # Mouse wheel step size (px) when over the image
+BRUSH_WHEEL_STEP = 4
 PALETTE: List[str] = [
     "#FF0000", "#00FF0000", "#0000FF", "#FFFF00", "#FFFFFF", "#000000", "#808080", "#FFA500",
     "#800080", "#A52A2A", "#008080", "#FFC0CB", "#00FFFF", "#FF00FF", "#40E0D0", "#E6E6FA",
@@ -78,8 +77,7 @@ PALETTE: List[str] = [
     "#C68642", "#8D5524", "#66381A", "#FBEADC", "#F5CBA7", "#E5A07A", "#DDBB99", "#B58A58",
     "#A16B36", "#6F441D", "#4D2A13", "#E0C7B3", "#D5A986", "#C58A6A"
 ]
-
-DETAILED_LOG = True  # Enable detailed logging
+DETAILED_LOG = True
 
 class PaintView(QtWidgets.QWidget):
     saved = QtCore.pyqtSignal(Path)
@@ -103,9 +101,9 @@ class PaintView(QtWidgets.QWidget):
             "blur": PaintToolBlur(),
             "clone": PaintToolClone(),
             "select": PaintToolSelection(),
+            "size": PaintToolPageSize(),     # <-- ADDED
             "diffuse": PaintToolDiffuse(),
         }
-        # Force default Paint tool active on creation
         self.tools_widget.set_active("Paint")
         self._on_tool_selected("Paint")
 
@@ -121,17 +119,16 @@ class PaintView(QtWidgets.QWidget):
         tlay.setSpacing(12)
 
         self.brush_controls = BrushControlsWidget(
-            initial_size=self._brush_size,
-            min_size=BRUSH_MIN,
-            max_size=BRUSH_MAX,
-            preview_size=BRUSH_PREVIEW_SIZE_PX,
+            initial_size=self._brush_size, min_size=BRUSH_MIN,
+            max_size=BRUSH_MAX, preview_size=BRUSH_PREVIEW_SIZE_PX
         )
         self.brush_controls.sizeChanged.connect(self._on_brush_size_changed)
 
         self.palette_widget = PaletteWidget(PALETTE)
         self.palette_widget.colorSelected.connect(self._on_brush_color_changed)
 
-        self.tools_widget = ToolsWidget(["Paint", "Mask", "Blur", "Clone", "Select", "Diffuse"])
+        # Added "Size" before "Diffuse"
+        self.tools_widget = ToolsWidget(["Paint", "Mask", "Blur", "Clone", "Select", "Size", "Diffuse"])
         self.tools_widget.toolSelected.connect(self._on_tool_selected)
 
         self.tool_options_box = QtWidgets.QGroupBox("Tool Options")
@@ -163,7 +160,6 @@ class PaintView(QtWidgets.QWidget):
 
         root.addWidget(toolbar, 0)
         root.addWidget(self.image_canvas, 1)
-
         self._update_brush_preview()
 
     def set_path(self, path: Optional[Path]):
@@ -178,7 +174,6 @@ class PaintView(QtWidgets.QWidget):
             return
         self._orig_pixmap = pix
         self.image_canvas.set_pixmap(self._orig_pixmap)
-        # Force default Paint tool each time edit mode (image) is entered
         self.tools_widget.set_active("Paint")
         self._on_tool_selected("Paint")
 
@@ -264,6 +259,11 @@ class PaintView(QtWidgets.QWidget):
                 "stamp_cb": self._on_stamp_request,
                 "tool_callback": self._tool_callback,
             }
+        elif self._active_tool == "size":  # <-- ADDED
+            params = {
+                "canvas": self.image_canvas,
+                "tool_callback": self._tool_callback,
+            }
 
         print(f"[PaintView] Activating tool: {self._active_tool}")
         for k, v in params.items():
@@ -309,32 +309,34 @@ class PaintView(QtWidgets.QWidget):
     def _on_stamp_request(self, img: QtGui.QImage, pos: QtCore.QPoint, *args, **kwargs):
         erase = False
         layer = kwargs.get("layer", "paint")
-        if args and len(args) > 0:
+        if args:
             erase = bool(args[0])
         if DETAILED_LOG:
-            print(f"[PaintView] Stamp request received: pos={pos}, erase={erase}, layer={layer}, img={img}, args={args}")
+            print(f"[PaintView] Stamp request: pos={pos} erase={erase} layer={layer}")
         if layer == "mask":
             overlay = getattr(self.image_canvas, "_mask_overlay", None)
             if overlay is None or overlay.isNull():
-                overlay = QtGui.QImage(self.image_canvas._pixmap.size(), QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+                overlay = QtGui.QImage(self.image_canvas._pixmap.size(),
+                                       QtGui.QImage.Format.Format_ARGB32_Premultiplied)
                 overlay.fill(0)
                 self.image_canvas._mask_overlay = overlay
         else:
             overlay = getattr(self.image_canvas, "_overlay", None)
             if overlay is None or overlay.isNull():
-                overlay = QtGui.QImage(self.image_canvas._pixmap.size(), QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+                overlay = QtGui.QImage(self.image_canvas._pixmap.size(),
+                                       QtGui.QImage.Format.Format_ARGB32_Premultiplied)
                 overlay.fill(0)
                 self.image_canvas._overlay = overlay
-        painter = QtGui.QPainter(overlay)
+        p = QtGui.QPainter(overlay)
         if erase:
-            painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Clear)
-            painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.setBrush(QtGui.QBrush(QtCore.Qt.GlobalColor.transparent))
-            painter.drawEllipse(pos.x(), pos.y(), img.width(), img.height())
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Clear)
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QBrush(QtCore.Qt.GlobalColor.transparent))
+            p.drawEllipse(pos.x(), pos.y(), img.width(), img.height())
         else:
-            painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
-            painter.drawImage(pos, img)
-        painter.end()
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
+            p.drawImage(pos, img)
+        p.end()
         self.image_canvas.update()
 
     def _compose_current_image(self) -> Optional[QtGui.QImage]:
@@ -353,72 +355,58 @@ class PaintView(QtWidgets.QWidget):
             return None
 
     def _update_brush_preview(self):
-        # Show dynamic cursor sprite preview for blur/clone/mask
         if self._active_tool == "blur" and hasattr(self._active_tool_obj, "update_cursor_with_blur"):
-            # Use center of canvas for preview if no mouse position
             canvas = self.image_canvas
             if canvas and hasattr(canvas, "rect"):
-                center = canvas.rect().center()
-                self._active_tool_obj.update_cursor_with_blur(center)
-                # The update_cursor_cb will set the preview pixmap
+                self._active_tool_obj.update_cursor_with_blur(canvas.rect().center())
                 return
         elif self._active_tool == "mask":
-            # Show white brush for mask, black for erase
-            erase_mode = False
-            if hasattr(self._active_tool_obj, "_erase_mode"):
-                erase_mode = getattr(self._active_tool_obj, "_erase_mode")
+            erase_mode = getattr(self._active_tool_obj, "_erase_mode", False)
             color = QtGui.QColor(0, 0, 0) if erase_mode else QtGui.QColor(255, 255, 255)
             pm = QtGui.QPixmap(BRUSH_PREVIEW_SIZE_PX, BRUSH_PREVIEW_SIZE_PX)
             pm.fill(QtCore.Qt.GlobalColor.transparent)
-            painter = QtGui.QPainter(pm)
-            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-            painter.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
-            pen = QtGui.QPen(QtGui.QColor("#444444"))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            painter.setBrush(color)
+            qp = QtGui.QPainter(pm)
+            qp.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            qp.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
+            pen = QtGui.QPen(QtGui.QColor("#444444")); pen.setWidth(1)
+            qp.setPen(pen); qp.setBrush(color)
             r = max(2, min(self._brush_size, BRUSH_PREVIEW_SIZE_PX - 6))
-            cx = cy = BRUSH_PREVIEW_SIZE_PX // 2
-            painter.drawEllipse(QtCore.QPointF(cx, cy), r / 2.0, r / 2.0)
-            painter.end()
+            c = BRUSH_PREVIEW_SIZE_PX // 2
+            qp.drawEllipse(QtCore.QPointF(c, c), r / 2.0, r / 2.0)
+            qp.end()
             self.brush_controls.set_preview_pixmap(pm)
             return
         elif self._active_tool == "clone":
             sprite = self.image_canvas.get_cursor_sprite()
-            if sprite is not None:
+            if sprite:
                 pm = draw_brush_preview(sprite, BRUSH_PREVIEW_SIZE_PX, QtGui.QColor("yellow"))
             else:
                 pm = QtGui.QPixmap(BRUSH_PREVIEW_SIZE_PX, BRUSH_PREVIEW_SIZE_PX)
                 pm.fill(QtCore.Qt.GlobalColor.transparent)
-                painter = QtGui.QPainter(pm)
-                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-                painter.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
-                pen = QtGui.QPen(QtGui.QColor("#444444"))
-                pen.setWidth(1)
-                painter.setPen(pen)
-                painter.setBrush(QtGui.QColor("yellow"))
+                qp = QtGui.QPainter(pm)
+                qp.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+                qp.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
+                pen = QtGui.QPen(QtGui.QColor("#444444")); pen.setWidth(1)
+                qp.setPen(pen); qp.setBrush(QtGui.QColor("yellow"))
                 r = max(2, min(self._brush_size, BRUSH_PREVIEW_SIZE_PX - 6))
-                cx = cy = BRUSH_PREVIEW_SIZE_PX // 2
-                painter.drawEllipse(QtCore.QPointF(cx, cy), r / 2.0, r / 2.0)
-                painter.end()
+                c = BRUSH_PREVIEW_SIZE_PX // 2
+                qp.drawEllipse(QtCore.QPointF(c, c), r / 2.0, r / 2.0)
+                qp.end()
             self.brush_controls.set_preview_pixmap(pm)
             return
-        # Default: solid circle of current brush color
+        # Default (including size tool – show current brush color for consistency)
         pm = QtGui.QPixmap(BRUSH_PREVIEW_SIZE_PX, BRUSH_PREVIEW_SIZE_PX)
         pm.fill(QtCore.Qt.GlobalColor.transparent)
-        painter = QtGui.QPainter(pm)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
-        pen = QtGui.QPen(QtGui.QColor("#444444"))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.setBrush(self._brush_color)
+        qp = QtGui.QPainter(pm)
+        qp.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        qp.fillRect(pm.rect(), QtGui.QColor("#ffffff"))
+        pen = QtGui.QPen(QtGui.QColor("#444444")); pen.setWidth(1)
+        qp.setPen(pen); qp.setBrush(self._brush_color)
         r = max(2, min(self._brush_size, BRUSH_PREVIEW_SIZE_PX - 6))
-        cx = cy = BRUSH_PREVIEW_SIZE_PX // 2
-        painter.drawEllipse(QtCore.QPointF(cx, cy), r / 2.0, r / 2.0)
-        painter.end()
+        c = BRUSH_PREVIEW_SIZE_PX // 2
+        qp.drawEllipse(QtCore.QPointF(c, c), r / 2.0, r / 2.0)
+        qp.end()
         self.brush_controls.set_preview_pixmap(pm)
-        # Solid paint cursor on canvas while in paint mode
         if self._active_tool == "paint":
             size = max(8, self._brush_size)
             cur_pm = QtGui.QPixmap(size, size)
@@ -430,11 +418,13 @@ class PaintView(QtWidgets.QWidget):
             p.drawEllipse(QtCore.QPointF(size / 2, size / 2), size / 2 - 0.5, size / 2 - 0.5)
             p.end()
             self.image_canvas.setCursor(QtGui.QCursor(cur_pm, size // 2, size // 2))
+        elif self._active_tool == "size":
+            # Neutral arrow cursor while adjusting page size
+            self.image_canvas.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
 
     def _save_current(self):
         def show_message(msg: str, title: str = "Save"):
             QtWidgets.QMessageBox.warning(self, title, msg)
-
         if not self.current_path:
             show_message("No image selected.")
             return
@@ -442,14 +432,11 @@ class PaintView(QtWidgets.QWidget):
             out_path = next_edit_filename(self.current_path)
             base = QtGui.QImage(str(self.current_path))
             if base.isNull():
-                show_message("Failed to read source image.", "Save Error")
-                return
+                show_message("Failed to read source image.", "Save Error"); return
             overlay = getattr(self.image_canvas, "_overlay", None)
             composed = compose_images(base, overlay)
-            ok = composed.save(str(out_path))
-            if not ok:
-                show_message("Failed to write image.", "Save Error")
-                return
+            if not composed.save(str(out_path)):
+                show_message("Failed to write image.", "Save Error"); return
             self.saved.emit(out_path)
         except Exception as ex:
             show_message(f"Error: {ex}", "Save Error")
@@ -460,51 +447,100 @@ class PaintView(QtWidgets.QWidget):
     def _on_tool_event(self, event: str, value: str | bool):
         if event == "error":
             QtWidgets.QMessageBox.critical(self, "Tool Error", str(value))
-        elif event == "busy":
-            if value:
+            return
+        if event == "busy":
+            # Do NOT disable the entire PaintView anymore (keeps progress UI active).
+            busy = bool(value)
+            # Keep a busy cursor while diffusion runs.
+            if busy:
                 QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.BusyCursor)
-                self.setEnabled(False)
             else:
                 try:
                     QtWidgets.QApplication.restoreOverrideCursor()
                 except Exception:
                     pass
-                self.setEnabled(True)
-        elif event == "save":
+
+            # Only disable the Diffuse tool's run buttons (T2I / I2I)
+            self._set_diffuse_run_state(busy)
+            return
+        if event == "save":
             out_path = Path(str(value))
             self.saved.emit(out_path)
             if self._active_tool == "diffuse":
                 self.diffused.emit(out_path)
-        elif event == "color":
+            return
+        if event == "color":
             # Persist picked/palette color as global brush color across tool switches & size changes
             if isinstance(value, QtGui.QColor):
                 self._brush_color = QtGui.QColor(value)
             else:
                 self._brush_color = QtGui.QColor(str(value))
-            # Update active paint tool if needed
             if self._active_tool == "paint" and self._active_tool_obj and hasattr(self._active_tool_obj, "on_color_changed"):
                 self._active_tool_obj.on_color_changed(self._brush_color)
             self._update_brush_preview()
 
+    def _set_diffuse_run_state(self, busy: bool):
+        """
+        Enable / disable only the Diffuse tool's run buttons.
+        """
+        # If active tool is diffuse use it; else look it up (in case progress arrives after switch)
+        diffuse_tool = None
+        if self._active_tool == "diffuse" and isinstance(self._active_tool_obj, object):
+            diffuse_tool = self._active_tool_obj
+        else:
+            diffuse_tool = self._tool_map.get("diffuse")
+
+        if not diffuse_tool:
+            return
+
+        for attr in ("btn_t2i", "btn_i2i"):
+            btn = getattr(diffuse_tool, attr, None)
+            if btn:
+                btn.setEnabled(not busy)
+
+    # --- Event filter: mouse wheel on canvas adjusts brush size via the slider ---
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.image_canvas and event.type() == QtCore.QEvent.Type.Wheel:
+            # Old logic rejected wheel events unless the pointer was strictly inside the
+            # image frame (frame.contains(posf)). After painting, the user often hovers
+            # over semi‑transparent overlay / stroke edges that lie just outside the
+            # fitted frame rectangle (due to antialiasing, brush radius, or letterboxing).
+            # That caused the size change to "not work" over painted areas.
+            #
+            # Fix: accept wheel events anywhere over the canvas widget, but still prefer
+            # to clamp when the image exists. Additionally, we slightly inflate the frame
+            # by the current brush size so edge hovers are not rejected.
             try:
-                frame = self.image_canvas._fit_rect()
-                posf = event.position()
-                if isinstance(posf, QtCore.QPointF) and not frame.contains(posf):
-                    return super().eventFilter(obj, event)
-            except Exception:
-                pass
-            dy = 0
-            try:
-                dy = event.angleDelta().y() or event.pixelDelta().y()
+                dy = event.angleDelta().y()
+                if dy == 0:
+                    dy = event.pixelDelta().y()
             except Exception:
                 dy = 0
+
             if dy != 0:
-                sign = 1 if dy > 0 else -1
-                new_size = max(BRUSH_MIN, min(BRUSH_MAX, int(self._brush_size + sign * BRUSH_WHEEL_STEP)))
-                if new_size != self._brush_size:
-                    self.brush_controls.set_size(new_size)
-                event.accept()
-                return True
+                allow = True
+                try:
+                    frame = self.image_canvas._fit_rect()
+                    posf = event.position()
+                    if isinstance(posf, QtCore.QPointF):
+                        # Inflate frame by brush size so near-edge painted pixels still count.
+                        infl = self._brush_size
+                        inflated = frame.adjusted(-infl, -infl, infl, infl)
+                        allow = inflated.contains(posf)
+                except Exception:
+                    # If anything fails, fall back to allowing the resize.
+                    allow = True
+
+                # Even if pointer is outside inflated frame, still allow resizing when
+                # the active tool shows brush controls (user expectation: wheel always works).
+                if not allow and getattr(self._active_tool_obj, "display_brush_controls", False):
+                    allow = True
+
+                if allow:
+                    sign = 1 if dy > 0 else -1
+                    new_size = max(BRUSH_MIN, min(BRUSH_MAX, int(self._brush_size + sign * BRUSH_WHEEL_STEP)))
+                    if new_size != self._brush_size:
+                        self.brush_controls.set_size(new_size)  # emits sizeChanged
+                    event.accept()
+                    return True
         return super().eventFilter(obj, event)
