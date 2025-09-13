@@ -153,7 +153,8 @@ class SDXLBackend(Backend):
             steps = int((inputs or {}).get("num_inference_steps") or self._DEFAULT_STEPS)
             guidance = float((inputs or {}).get("guidance_scale") or self._DEFAULT_CFG)
             seed = seed_from_inputs(inputs or {})
-            width, height = compute_sdxl_size(req_w, req_h)
+            # Use the requested dimensions directly, bypassing compute_sdxl_size.
+            width, height = req_w, req_h
             lora_paths = resolve_lora_list(loras or [], self._LORAS_DIR)
 
             # Stage 0..10: model / pipeline preparation

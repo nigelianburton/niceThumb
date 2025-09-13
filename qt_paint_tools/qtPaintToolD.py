@@ -173,7 +173,7 @@ class PaintToolDiffuse(QtCore.QObject):
         # New stage label above progress bar
         self.lbl_stage = QtWidgets.QLabel("Idle")
         self.lbl_stage.setObjectName("lbl_stage_status")
-        self.lbl_stage.setStyleSheet("color:#444;")
+        self.lbl_stage.setStyleSheet("color:#FFD400;")  # strong yellow
         self.lbl_stage.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         progress_col.addWidget(self.lbl_stage)
 
@@ -449,7 +449,11 @@ class PaintToolDiffuse(QtCore.QObject):
             self._last_used_seed = int(seed)
         if self.cb_qwen.isChecked():
             # Route Qwen T2I through new backend 't2i' op (which internally uses i2i with synthetic image)
-            model_id = self._qwen_model_id or QWEN_MODEL_NAME
+            model_id = self._qwen_model_id
+            if not model_id:
+                print("[PaintToolDiffuse] ERROR: Qwen T2I clicked, but no Qwen model ID discovered from backend.")
+                self._emit_error("No Qwen model available from backend.")
+                return
             inputs = {
                 "prompt": prompt,
                 "true_cfg_scale": self._true_cfg_value(),
@@ -464,10 +468,19 @@ class PaintToolDiffuse(QtCore.QObject):
             model_id = self._current_sdxl_model_id()
             if not model_id:
                 return
+
+            # Get current canvas dimensions for the request.
+            img = self._compose_image_provider() if self._compose_image_provider else None
+            width = img.width() if img and not img.isNull() else 1024
+            height = img.height() if img and not img.isNull() else 1024
+            
+            # Log the dimensions being sent to the server.
+            print(f"[PaintToolDiffuse] Submitting T2I job with dimensions: {width}x{height}")
+
             inputs = {
                 "prompt": prompt,
-                "width": 1024,
-                "height": 1024,
+                "width": width,
+                "height": height,
                 "guidance_scale": self._guidance_value(),
                 "num_inference_steps": int(self.sl_steps.value()),
                 "generator": seed,
@@ -488,7 +501,11 @@ class PaintToolDiffuse(QtCore.QObject):
         if isinstance(seed, int):
             self._last_used_seed = int(seed)
         if self.cb_qwen.isChecked():
-            model_id = self._qwen_model_id or QWEN_MODEL_NAME
+            model_id = self._qwen_model_id
+            if not model_id:
+                print("[PaintToolDiffuse] ERROR: Qwen I2I clicked, but no Qwen model ID discovered from backend.")
+                self._emit_error("No Qwen model available from backend.")
+                return
             inputs = {
                 "prompt": prompt,
                 "true_cfg_scale": self._true_cfg_value(),
@@ -785,6 +802,10 @@ class PaintToolDiffuse(QtCore.QObject):
             img = QtGui.QImage()
             if not img.loadFromData(raw):
                 return None
+            
+            # Log the dimensions of the received image.
+            print(f"[PaintToolDiffuse] Received image with dimensions: {img.width()}x{img.height()}")
+
             if suggest_from and isinstance(suggest_from, Path) and suggest_from.exists():
                 out = next_edit_filename(suggest_from)
             else:

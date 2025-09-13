@@ -1,5 +1,6 @@
 from PyQt6 import QtCore, QtGui, QtWidgets
 from typing import List, Optional, Dict, Tuple
+from PIL import Image
 
 # Updated palette definition as a dictionary with categories, names, and RGB tuples
 PALETTE: Dict[str, List[Tuple[str, Tuple[int, int, int]]]] = {
@@ -295,3 +296,23 @@ def blur_qimage_gaussian(img: QtGui.QImage, strength: float) -> QtGui.QImage:
     scene.render(painter)
     painter.end()
     return result
+
+def pil_to_qimage(pil_img: Image.Image) -> QtGui.QImage:
+    """Convert a PIL Image to a QImage."""
+    if pil_img.mode != "RGBA":
+        pil_img = pil_img.convert("RGBA")
+    data = pil_img.tobytes("raw", "RGBA")
+    qimg = QtGui.QImage(data, pil_img.width, pil_img.height, QtGui.QImage.Format.Format_RGBA8888)
+    return qimg
+
+def qimage_to_pil(qimg: QtGui.QImage) -> Image.Image:
+    """Convert a QImage to a PIL Image."""
+    if qimg.format() != QtGui.QImage.Format.Format_RGBA8888:
+        qimg = qimg.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+    
+    ptr = qimg.bits()
+    ptr.setsize(qimg.sizeInBytes())
+    arr = bytes(ptr)
+    
+    img = Image.frombuffer("RGBA", (qimg.width(), qimg.height()), arr, "raw", "RGBA", 0, 1)
+    return img

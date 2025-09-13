@@ -50,15 +50,19 @@ Notes
 """
 from __future__ import annotations
 import os
+import time
 from pathlib import Path
 from typing import Callable, Optional, Dict, List, Set
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 from qtBrowseHelpers import (
     thumbnail_path as helper_thumbnail_path,
     ensure_thumbnail as helper_ensure_thumbnail
+)
+from qt_paint_tools.qtPaintToolUtilities import (
+    blur_qimage_gaussian, pil_to_qimage, qimage_to_pil
 )
 
 DEBUG_BORDER_PX = 3
@@ -76,6 +80,10 @@ THUMB_LABEL_FONT_SIZE_PT = 9
 HEADER_PADDING_PX = 1       # was 5
 HEADER_BUTTON_SIZE_PX = 37  # was 32
 HEADER_SLIDER_WIDTH_PX = 128
+NEW_IMAGE_BLUR_STRENGTH = 100
+NEW_IMAGE_BLUR_ITERATIONS = 5
+NEW_IMAGE_BG_COLOR = (245, 245, 245)  # Very light gray
+NEW_IMAGE_RECT_COLOR = (180, 180, 180) # Light gray
 
 
 class _ResizeAwareScrollArea(QtWidgets.QScrollArea):
@@ -364,6 +372,11 @@ class BrowserView(QtWidgets.QWidget):
         self.btn_up.setFixedSize(HEADER_BUTTON_SIZE_PX, HEADER_BUTTON_SIZE_PX)
         button_layout.addWidget(self.btn_up)
 
+        self.btn_new = QtWidgets.QToolButton()
+        self.btn_new.setText("New")
+        self.btn_new.setFixedSize(HEADER_BUTTON_SIZE_PX, HEADER_BUTTON_SIZE_PX)
+        button_layout.addWidget(self.btn_new)
+
         self.btn_edit = QtWidgets.QToolButton()
         self.btn_edit.setText("Edit")
         self.btn_edit.setFixedSize(HEADER_BUTTON_SIZE_PX, HEADER_BUTTON_SIZE_PX)
@@ -389,7 +402,7 @@ class BrowserView(QtWidgets.QWidget):
         self.btn_llm.setFixedSize(HEADER_BUTTON_SIZE_PX, HEADER_BUTTON_SIZE_PX)
         button_layout.addWidget(self.btn_llm)
 
-        button_container.setFixedWidth(6 * HEADER_BUTTON_SIZE_PX + 6 * 1)  # 6 buttons, 1px spacing each
+        button_container.setFixedWidth(7 * HEADER_BUTTON_SIZE_PX + 7 * 1)  # 7 buttons, 1px spacing each
         header_layout.addWidget(button_container, 0)  # Stretch factor 0
 
         # S/M/L size buttons
@@ -463,6 +476,7 @@ class BrowserView(QtWidgets.QWidget):
         """)
 
         self.btn_up.clicked.connect(self._go_up)
+        self.btn_new.clicked.connect(self._on_new_clicked)
         self.btn_edit.clicked.connect(self._on_edit_clicked)
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_select_all.clicked.connect(self._select_all_files)
@@ -481,6 +495,55 @@ class BrowserView(QtWidgets.QWidget):
 
     def _on_auto_clicked(self):
         QtWidgets.QMessageBox.information(self, "Auto", "AUTO action triggered")
+
+    def _on_new_clicked(self):
+        """Creates a new blank (blurred rectangle) image in the current directory."""
+        try:
+            # 1. Generate the image content
+            img = self._generate_new_base_image(1024, 1024)
+
+            # 2. Determine a unique filename
+            current_dir = Path(self.state.get('current_path', self.root_path))
+            timestamp = int(time.time())
+            i = 0
+            while True:
+                suffix = f"_{i}" if i > 0 else ""
+                new_path = current_dir / f"new_{timestamp}{suffix}.png"
+                if not new_path.exists():
+                    break
+                i += 1
+
+            # 3. Save the image
+            img.save(str(new_path), "PNG")
+
+            # 4. Refresh the browser and select the new file
+            self.refresh_and_select(new_path)
+
+        except Exception as e:
+            print(f"[browse] Failed to create new image: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not create new image:\n{e}")
+
+    def _generate_new_base_image(self, width: int, height: int) -> Image.Image:
+        """
+        Creates a new image of the specified size with a blurred rectangle.
+        """
+        W, H = width, height
+        # Scale the rectangle to be ~80% of the image dimensions
+        RW, RH = int(W * 0.8), int(H * 0.8)
+        rx = (W - RW) // 2
+        ry = H - RH
+
+        img = Image.new("RGB", (W, H), NEW_IMAGE_BG_COLOR)
+        dr = ImageDraw.Draw(img)
+        dr.rectangle([rx, ry, rx + RW, ry + RH], fill=NEW_IMAGE_RECT_COLOR)
+
+        # Convert to QImage, blur, and convert back to PIL. No fallback.
+        qimg = pil_to_qimage(img)
+        blurred_q = qimg
+        for _ in range(NEW_IMAGE_BLUR_ITERATIONS):
+            blurred_q = blur_qimage_gaussian(blurred_q, strength=NEW_IMAGE_BLUR_STRENGTH)
+        out = qimage_to_pil(blurred_q)
+        return out.convert("RGB")
 
     def _update_header_buttons(self):
         self.btn_edit.setEnabled(self._edit_enabled())
@@ -690,6 +753,10 @@ class BrowserView(QtWidgets.QWidget):
                 self.on_item_selected(path)
             else:
                 self.on_item_selected(None)
+            # Ensure the newly selected item is visible
+            card = self.card_map.get(path)
+            if card:
+                self.scroll.ensureWidgetVisible(card)
 
     def _set_path(self, path: Path):
         if not self._interactive:
@@ -755,7 +822,7 @@ class BrowserView(QtWidgets.QWidget):
 
     def _set_header_enabled(self, enabled: bool):
         # Enable/disable all header buttons
-        for btn in [self.btn_up, self.btn_edit, self.btn_delete, self.btn_select_all, self.btn_auto, self.btn_s, self.btn_m, self.btn_l, self.btn_llm]:
+        for btn in [self.btn_up, self.btn_new, self.btn_edit, self.btn_delete, self.btn_select_all, self.btn_auto, self.btn_s, self.btn_m, self.btn_l, self.btn_llm]:
             btn.setEnabled(enabled)
 
 

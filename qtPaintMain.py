@@ -19,8 +19,9 @@ from qt_paint_tools.qtPaintToolClone import PaintToolClone
 from qt_paint_tools.qtPaintToolD import PaintToolDiffuse
 from qt_paint_tools.qtPaintToolSelection import PaintToolSelection
 from qt_paint_tools.qtPaintToolPageSize import PaintToolPageSize  # <-- ADDED
+from qt_paint_tools.qtPaintToolUtilities import PALETTE, ToolPaletteWidget
 
-from qtPaintWidgets import BrushControlsWidget, PaletteWidget, ToolsWidget, ActionsWidget
+from qtPaintWidgets import BrushControlsWidget, ToolsWidget, ActionsWidget
 from qtPaintCanvas import PaintCanvas
 
 # --- Self-contained helpers ---
@@ -67,16 +68,6 @@ BRUSH_PREVIEW_SIZE_PX = 92
 BRUSH_MIN = 2
 BRUSH_MAX = 92
 BRUSH_WHEEL_STEP = 4
-PALETTE: List[str] = [
-    "#FF0000", "#00FF0000", "#0000FF", "#FFFF00", "#FFFFFF", "#000000", "#808080", "#FFA500",
-    "#800080", "#A52A2A", "#008080", "#FFC0CB", "#00FFFF", "#FF00FF", "#40E0D0", "#E6E6FA",
-    "#FDFD96", "#FF1493", "#DB7093", "#FFB6C1", "#F08080", "#CD5C5C", "#E0B0FF", "#B4E4B4",
-    "#FFB347", "#FFD1DC", "#AEC6CF", "#C3B1E1", "#77DD77", "#836953", "#FAF0E6", "#FFFACD",
-    "#EEE8AA", "#F0E68C", "#FFD700", "#DAA520", "#B8860B", "#D2B48C", "#A0522D", "#8B4513",
-    "#D2691E", "#CD853F", "#BC8F8F", "#F4A460", "#800000", "#5C4033", "#F0D5BE", "#E0AC69",
-    "#C68642", "#8D5524", "#66381A", "#FBEADC", "#F5CBA7", "#E5A07A", "#DDBB99", "#B58A58",
-    "#A16B36", "#6F441D", "#4D2A13", "#E0C7B3", "#D5A986", "#C58A6A"
-]
 DETAILED_LOG = True
 
 class PaintView(QtWidgets.QWidget):
@@ -124,7 +115,7 @@ class PaintView(QtWidgets.QWidget):
         )
         self.brush_controls.sizeChanged.connect(self._on_brush_size_changed)
 
-        self.palette_widget = PaletteWidget(PALETTE)
+        self.palette_widget = ToolPaletteWidget(PALETTE, initial_color=self._brush_color)
         self.palette_widget.colorSelected.connect(self._on_brush_color_changed)
 
         # Added "Size" before "Diffuse"
@@ -340,13 +331,10 @@ class PaintView(QtWidgets.QWidget):
         self.image_canvas.update()
 
     def _compose_current_image(self) -> Optional[QtGui.QImage]:
-        if not self.current_path:
-            return None
-        base = QtGui.QImage(str(self.current_path))
-        if base.isNull():
-            return None
-        overlay = getattr(self.image_canvas, "_overlay", None)
-        return compose_images(base, overlay)
+        """Returns the current, fully composed image from the canvas."""
+        if self.image_canvas:
+            return self.image_canvas.get_composed_image()
+        return None
 
     def _get_mask_image(self) -> Optional[QtGui.QImage]:
         try:
@@ -430,11 +418,12 @@ class PaintView(QtWidgets.QWidget):
             return
         try:
             out_path = next_edit_filename(self.current_path)
-            base = QtGui.QImage(str(self.current_path))
-            if base.isNull():
-                show_message("Failed to read source image.", "Save Error"); return
-            overlay = getattr(self.image_canvas, "_overlay", None)
-            composed = compose_images(base, overlay)
+            
+            # Use the canvas's current composed image, which includes size changes.
+            composed = self.image_canvas.get_composed_image()
+            if composed is None or composed.isNull():
+                show_message("Failed to get current image from canvas.", "Save Error"); return
+
             if not composed.save(str(out_path)):
                 show_message("Failed to write image.", "Save Error"); return
             self.saved.emit(out_path)

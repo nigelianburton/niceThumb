@@ -1,29 +1,15 @@
 ﻿from __future__ import annotations
 from PyQt6 import QtCore, QtGui, QtWidgets
 from typing import Optional, Callable, List, Tuple
+import math
 
-ALLOWED_PAGE_SIZES: List[Tuple[int, int]] = [
-    (672, 1568),
-    (688, 1504),
-    (720, 1456),
-    (752, 1392),
-    (800, 1328),
-    (832, 1248),
-    (880, 1184),
-    (944, 1104),
-    (1024, 1024),
-    (1104, 944),
-    (1184, 880),
-    (1248, 832),
-    (1328, 800),
-    (1392, 752),
-    (1456, 720),
-    (1504, 688),
-    (1568, 672),
-]
+from .qtPaintToolUtilities import get_composed_image
 
+EXPANSION_AMOUNT_PX = 128
 PREVIEW_FRAME_PX = 92
 PREVIEW_INSET = 4  # margin inside frame for drawing
+FILL_COLOR = QtGui.QColor(128, 128, 128)  # Neutral gray for new areas
+TARGET_AREA = 1024 * 1024
 
 class PaintToolPageSize(QtCore.QObject):
     """
@@ -31,9 +17,7 @@ class PaintToolPageSize(QtCore.QObject):
 
     UI:
       [ 92x92 framed preview ]
-      [Up]
-      [Sz  H,W]
-      [Down]
+      [H,W size display]
       [ 3x3 expansion grid with directional expand buttons ]
 
     Signals:
@@ -51,9 +35,7 @@ class PaintToolPageSize(QtCore.QObject):
         self._canvas = None
         self._tool_callback: Optional[Callable[[str, str | bool], None]] = None
         self._options_widget: Optional[QtWidgets.QWidget] = None
-        # Start at 1024x1024
-        self._index = next((i for i, hw in enumerate(ALLOWED_PAGE_SIZES) if hw == (1024, 1024)), 8)
-        self._height, self._width = ALLOWED_PAGE_SIZES[self._index]
+        self._height, self._width = 1024, 1024
 
         # UI refs
         self._lbl_size: Optional[QtWidgets.QLabel] = None
@@ -76,7 +58,13 @@ class PaintToolPageSize(QtCore.QObject):
     ) -> dict:
         self._canvas = canvas
         self._tool_callback = tool_callback
-        # Ensure UI reflects current size
+        
+        # Initialize size from current canvas
+        if self._canvas and hasattr(self._canvas, "_pixmap") and self._canvas._pixmap:
+            pixmap = self._canvas._pixmap
+            self._width = pixmap.width()
+            self._height = pixmap.height()
+
         self._update_size_label()
         self._update_preview()
         return {
@@ -84,6 +72,11 @@ class PaintToolPageSize(QtCore.QObject):
             "display_palette": self.display_palette,
             "display_tool_options": self.display_tool_options,
         }
+
+    def on_deselected(self):
+        """Called when the tool is switched away from."""
+        if self._canvas:
+            self._canvas.commit_canvas_state()
 
     # --- UI Construction ---
     def _build_ui(self):
@@ -105,39 +98,20 @@ class PaintToolPageSize(QtCore.QObject):
         self._preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         pv_lay.addWidget(self._preview_label)
 
-        # Size selector column
-        col_sizes = QtWidgets.QVBoxLayout()
-        col_sizes.setContentsMargins(0, 0, 0, 0)
-        col_sizes.setSpacing(4)
-
-        btn_up = QtWidgets.QToolButton()
-        btn_up.setText("▲")
-        btn_up.clicked.connect(self._on_increase_aspect)
-
+        # Size display column
+        col_display = QtWidgets.QVBoxLayout()
+        col_display.setContentsMargins(0, 0, 0, 0)
+        col_display.setSpacing(4)
+        
         self._lbl_size = QtWidgets.QLabel("")
         self._lbl_size.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._lbl_size.setMinimumWidth(88)
         font = self._lbl_size.font()
         font.setBold(True)
         self._lbl_size.setFont(font)
-
-        lbl_cap = QtWidgets.QLabel("Sz")
-        lbl_cap.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-
-        size_row = QtWidgets.QHBoxLayout()
-        size_row.setContentsMargins(0, 0, 0, 0)
-        size_row.setSpacing(4)
-        size_row.addWidget(lbl_cap)
-        size_row.addWidget(self._lbl_size, 1)
-
-        btn_down = QtWidgets.QToolButton()
-        btn_down.setText("▼")
-        btn_down.clicked.connect(self._on_decrease_aspect)
-
-        col_sizes.addWidget(btn_up)
-        col_sizes.addLayout(size_row)
-        col_sizes.addWidget(btn_down)
-        col_sizes.addStretch(1)
+        
+        col_display.addWidget(self._lbl_size)
+        col_display.addStretch(1)
 
         # Expansion grid column
         expand_col = QtWidgets.QVBoxLayout()
@@ -149,13 +123,6 @@ class PaintToolPageSize(QtCore.QObject):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(2)
         grid.setVerticalSpacing(2)
-
-        # Helper to place empty fillers
-        def ensure_cell(r, c):
-            if grid.itemAtPosition(r, c) is None:
-                spacer = QtWidgets.QLabel("")
-                spacer.setFixedSize(22, 22)
-                grid.addWidget(spacer, r, c)
 
         # Buttons for directional expansion
         self._btn_expand_up = QtWidgets.QToolButton()
@@ -174,32 +141,22 @@ class PaintToolPageSize(QtCore.QObject):
         self._btn_expand_down.setText("↓")
         self._btn_expand_down.clicked.connect(lambda: self._expand_dir("down"))
 
-        center_label = QtWidgets.QLabel("64")
+        center_label = QtWidgets.QLabel(str(EXPANSION_AMOUNT_PX))
         center_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         center_label.setFixedSize(32, 32)
         center_label.setStyleSheet("border:1px solid #444;")
 
-        # Place per spec (cell numbers: 0..8)
-        # Row0: cells 0 1 2
-        # Row1: cells 3 4 5
-        # Row2: cells 6 7 8
-        ensure_cell(0, 0)
         grid.addWidget(self._btn_expand_up, 0, 1)
-        ensure_cell(0, 2)
-
         grid.addWidget(self._btn_expand_left, 1, 0)
         grid.addWidget(center_label, 1, 1)
         grid.addWidget(self._btn_expand_right, 1, 2)
-
-        ensure_cell(2, 0)
-        ensure_cell(2, 1)
-        grid.addWidget(self._btn_expand_down, 2, 2)  # per spec: cell 8 (row2,col2)
+        grid.addWidget(self._btn_expand_down, 2, 1)
 
         expand_col.addWidget(grid_w, 0)
         expand_col.addStretch(1)
 
         layout.addWidget(preview_frame, 0)
-        layout.addLayout(col_sizes, 0)
+        layout.addLayout(col_display, 0)
         layout.addLayout(expand_col, 0)
         layout.addStretch(1)
 
@@ -208,35 +165,60 @@ class PaintToolPageSize(QtCore.QObject):
         self._update_preview()
 
     # --- Actions ---
-    def _on_increase_aspect(self):
-        # Move "away" from square toward more extreme aspect (higher index if available)
-        if self._index < len(ALLOWED_PAGE_SIZES) - 1:
-            self._index += 1
-            self._apply_index()
+    def _expand_dir(self, direction: str):
+        if not self._canvas:
+            return
 
-    def _on_decrease_aspect(self):
-        if self._index > 0:
-            self._index -= 1
-            self._apply_index()
+        old_w, old_h = self._width, self._height
+        new_w, new_h = old_w, old_h
+        dest_x, dest_y = 0, 0
 
-    def _apply_index(self):
-        self._height, self._width = ALLOWED_PAGE_SIZES[self._index]
+        if direction == "up":
+            new_h += EXPANSION_AMOUNT_PX
+            dest_y = EXPANSION_AMOUNT_PX
+        elif direction == "down":
+            new_h += EXPANSION_AMOUNT_PX
+            dest_y = 0
+        elif direction == "left":
+            new_w += EXPANSION_AMOUNT_PX
+            dest_x = EXPANSION_AMOUNT_PX
+        elif direction == "right":
+            new_w += EXPANSION_AMOUNT_PX
+            dest_x = 0
+        
+        # Round final dimensions to nearest multiple of 8
+        self._width = round(new_w / 8) * 8
+        self._height = round(new_h / 8) * 8
+        
+        # Instruct the canvas to perform the resize of all its layers
+        self._canvas.resize_canvas(self._width, self._height, dest_x, dest_y, FILL_COLOR)
+
         self._update_size_label()
         self._update_preview()
         self.sizeChanged.emit(self._height, self._width)
 
-    def _expand_dir(self, direction: str):
-        # Simple expansion: try to step one index toward larger area preserving direction bias.
-        # For now just print/log; can be replaced with real logic later.
-        if self._tool_callback:
-            self._tool_callback("info", f"expand_{direction}")
-        # Placeholder: no dimension change (spec did not define transformation)
-        # Could extend later to adjust width/height with a +64 increment respecting allowed list.
+    def _rescale_to_target_area(self, w: int, h: int) -> Tuple[int, int]:
+        """
+        Rescales dimensions to match TARGET_AREA while preserving aspect ratio,
+        rounding to the nearest multiple of 8.
+        """
+        if w <= 0 or h <= 0:
+            return 0, 0
+        
+        aspect = w / h
+        target_w = math.sqrt(TARGET_AREA * aspect)
+        target_h = TARGET_AREA / target_w
+        
+        # Round to nearest multiple of 8
+        new_w = round(target_w / 8) * 8
+        new_h = round(target_h / 8) * 8
+        
+        return int(new_w), int(new_h)
 
     # --- UI updates ---
     def _update_size_label(self):
         if self._lbl_size:
-            self._lbl_size.setText(f"{self._height},{self._width}")
+            self._lbl_size.setText(f"{self._height}x{self._width}")
 
     def _update_preview(self):
         if not self._preview_label:
@@ -246,20 +228,20 @@ class PaintToolPageSize(QtCore.QObject):
         painter = QtGui.QPainter(pm)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
 
-        # Compute rectangle representing aspect ratio inside inset bounds
         avail = PREVIEW_FRAME_PX - PREVIEW_INSET * 2
         h, w = self._height, self._width
         if h <= 0 or w <= 0:
             painter.end()
             self._preview_label.setPixmap(pm)
             return
-        # Fit by max dimension
+        
         if h >= w:
             rect_h = avail
-            rect_w = int(avail * (w / h))
+            rect_w = int(avail * (w / h)) if h > 0 else 0
         else:
             rect_w = avail
-            rect_h = int(avail * (h / w))
+            rect_h = int(avail * (h / w)) if w > 0 else 0
+            
         x = (PREVIEW_FRAME_PX - rect_w) // 2
         y = (PREVIEW_FRAME_PX - rect_h) // 2
 

@@ -143,11 +143,15 @@ class PaintToolPaint(QtCore.QObject):
     def _set_sub_mode(self, mode: str):
         if mode == self._sub_mode:
             return
+        
+        # If leaving 'size' mode, commit the changes.
+        if self._sub_mode == "size":
+            self._page_size_tool.on_deselected()
+
         self._sub_mode = mode
         if self._stack_modes:
             if mode == "paint":
                 self._stack_modes.setCurrentIndex(0)
-                # Leaving size mode: nothing special
             elif mode == "size":
                 self._stack_modes.setCurrentIndex(1)
                 # Activate embedded page size tool (no brush operations)
