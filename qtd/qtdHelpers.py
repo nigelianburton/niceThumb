@@ -73,6 +73,7 @@ def decode_data_url_to_pil(data_url: str) -> Image.Image:
 def decode_and_resize_image(data_url: str, width: int, height: int) -> Image.Image:
     img = decode_data_url_to_pil(data_url)
     if img.size != (width, height):
+        print(f"[qtd][resize][warn] Resizing image from {img.size} to ({width}, {height}) for SDXL i2i. This may be required for pipeline compatibility.")
         img = img.resize((width, height), Image.Resampling.LANCZOS)
     return img
 

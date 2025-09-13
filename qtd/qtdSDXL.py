@@ -22,6 +22,7 @@ try:
         seed_from_inputs,
         decode_and_resize_image,
         decode_and_resize_mask,
+        decode_data_url_to_pil,
         pil_to_data_url,
         compute_sdxl_size,
         make_diffusers_progress_callback,  # kept (not used now but retained for compatibility)
@@ -34,6 +35,7 @@ except ImportError:
         seed_from_inputs,
         decode_and_resize_image,
         decode_and_resize_mask,
+        decode_data_url_to_pil,
         pil_to_data_url,
         compute_sdxl_size,
         make_diffusers_progress_callback,
@@ -225,13 +227,18 @@ class SDXLBackend(Backend):
                 set_error("init_image is required for i2i")
                 return
             try:
-                init_img = decode_and_resize_image(init_image_url, width, height)
+                # Decode the image first, without resizing.
+                init_img = decode_data_url_to_pil(init_image_url)
+                if init_img.size != (width, height):
+                    print(f"[qtd][sdxl][alert] WARNING: SDXL pipeline will resize image from {init_img.size} to ({width}, {height}) due to pipeline requirements.")
+                width, height = init_img.size
             except Exception as e:
                 set_error(f"invalid init_image: {e}")
                 return
 
             out_img = None
             mask_url = (inputs or {}).get("mask_image")
+            # Pass the correct, non-resized dimensions to the mask decoder.
             mask_img = decode_and_resize_mask(mask_url, width, height) if mask_url else None
             if mask_img is not None:
                 try:
