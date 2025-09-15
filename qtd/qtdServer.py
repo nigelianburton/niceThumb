@@ -12,6 +12,13 @@ from werkzeug.serving import WSGIRequestHandler
 QUIET_HTTP_LOG = False
 QUIET_PROGRESS_ONLY = True
 
+# import debugpy
+# debugpy.listen(("localhost", 5678))  # You can change the port if needed
+# debugpy.wait_for_client()            # Pause until debugger attaches
+# print("qtServer.py is waiting for debugger to attach...")
+
+
+
 class QuietRequestHandler(WSGIRequestHandler):
     def log_request(self, code='-', size='-'):
         # Suppress everything if full quiet
@@ -117,11 +124,16 @@ def loras():
 
 @app.route("/jobs/submit", methods=["POST"])
 def submit():
-    data = request.get_json(force=True) or {}
-    model_id = data.get("modelId")
-    op = data.get("operation")
-    inputs = data.get("inputs") or {}
-    loras = data.get("loras")
+    payload = request.get_json(force=True)
+    model_id = payload.get("modelId")
+    op = payload.get("operation")
+    inputs = payload.get("inputs") or {}
+    loras = payload.get("loras")
+
+    mask_active = payload.get("mask_active", None)  # <-- Accept optional bool
+
+    if mask_active is not None:
+        inputs["mask_active"] = bool(mask_active)  # <-- Pass to backend
 
     backend_id = MODEL_INDEX.get(model_id or "", "")
     b = BACKENDS.get(backend_id)

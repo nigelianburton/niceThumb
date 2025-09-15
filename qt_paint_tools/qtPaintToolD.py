@@ -33,6 +33,10 @@ import threading
 from qtPaintHelpers import next_edit_filename
 from qt_paint_tools.qtPaintToolUtilities import make_brush_cursor
 
+# --- Mask blur constants ---
+MASK_BLUR_RADIUS = 30
+MASK_BLUR_TIMES = 1
+
 QWEN_MODEL_NAME = r"C:\_MODELS-SD\Qwen\Qwen-Image-Edit"
 QWEN_LIGHTNING_DIR = r"C:\_CONDA\niceThumb\Qwen-Image-Lightning"
 
@@ -63,6 +67,8 @@ class PaintToolDiffuse(QtCore.QObject):
 
     def __init__(self):
         super().__init__()
+        self.mask_active = False
+
         self._api_base = os.environ.get("NT6DIFF_API", "http://127.0.0.1:5015").rstrip("/")
 
         self._current_path: Optional[Path] = None
@@ -101,12 +107,14 @@ class PaintToolDiffuse(QtCore.QObject):
     def on_selected(
         self,
         canvas,
-        root_path: Path,
-        current_path: Optional[Path],
-        compose_image_provider: Callable[[], Optional[QtGui.QImage]],
-        mask_image_provider: Callable[[], Optional[QtGui.QImage]],
-        tool_callback: Optional[Callable[[str, str | bool], None]] = None
+        root_path,
+        current_path,
+        compose_image_provider,
+        mask_image_provider,
+        tool_callback=None,
+        mask_active=False
     ) -> dict:
+        self.mask_active = mask_active
         if canvas is None or root_path is None or compose_image_provider is None:
             print("[PaintToolDiffuse] ERROR: invalid parameters in on_selected")
             return {}
@@ -427,7 +435,10 @@ class PaintToolDiffuse(QtCore.QObject):
 
     def _on_seed_lock_toggled(self, checked: bool):
         if checked:
-            val = self._last_used_seed if isinstance(self._last_used_seed, int) and self._last_used_seed != 0 else 17
+            if isinstance(self._last_used_seed, int) and self._last_used_seed != 0:
+                val = self._last_used_seed
+            else:
+                val = 17
             try:
                 self.sp_seed.blockSignals(True)
                 self.sp_seed.setValue(int(val))
@@ -500,6 +511,39 @@ class PaintToolDiffuse(QtCore.QObject):
         seed = self._seed_value()
         if isinstance(seed, int):
             self._last_used_seed = int(seed)
+        print(f"[PaintToolDiffuse] mask_active={self.mask_active}")
+        print(f"[PaintToolDiffuse] mask_image_provider={self._mask_image_provider}")
+
+        mask_to_send = None
+        mask_was_empty = False
+        if self.mask_active and self._mask_image_provider:
+            m = self._mask_image_provider()
+            if m is None or m.isNull():
+                mask_was_empty = True
+            else:
+                # --- Production blurred white mask ---
+                blurred_mask = QtGui.QImage(m)
+                for _ in range(MASK_BLUR_TIMES):
+                    blurred_mask = self._qt_blur_image(blurred_mask, MASK_BLUR_RADIUS)
+                # Fill mask with white, keeping alpha from original mask
+                white_mask = QtGui.QImage(blurred_mask.size(), QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+                white_mask.fill(QtGui.QColor(255, 255, 255, 0))  # start fully transparent
+                painter = QtGui.QPainter(white_mask)
+                painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Source)
+                painter.drawImage(0, 0, blurred_mask)
+                painter.end()
+                mask_to_send = white_mask
+
+                print("[PaintToolDiffuse] Production blurred white mask created and assigned to overlay.")
+
+                # Update overlay only
+                if self._canvas and hasattr(self._canvas, "_mask_overlay"):
+                    self._canvas._mask_overlay = QtGui.QImage(white_mask)
+                    if hasattr(self._canvas, "set_mask_visible"):
+                        self._canvas.set_mask_visible(True)
+                    self._canvas.update()
+        if self.mask_active and mask_was_empty:
+            print("[PaintToolDiffuse][WARNING] Mask checkbox is ON but mask is empty or null. No mask will be sent to the server.")
         if self.cb_qwen.isChecked():
             model_id = self._qwen_model_id
             if not model_id:
@@ -513,13 +557,8 @@ class PaintToolDiffuse(QtCore.QObject):
                 "generator": seed,
                 "init_image": self._qimage_to_data_url(img),
             }
-            if self._mask_image_provider:
-                m = self._mask_image_provider()
-                if m and not m.isNull():
-                    if m.size() != img.size():
-                        m = m.scaled(img.size(), QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                                     QtCore.Qt.TransformationMode.SmoothTransformation)
-                    inputs["mask_image"] = self._qimage_to_data_url(m)
+            if mask_to_send is not None:
+                inputs["mask_image"] = self._qimage_to_data_url(mask_to_send)
             l = self._selected_qwen_lora()
             loras = [l] if l else []
             log_params = {k: v for k, v in inputs.items() if k not in ("init_image", "mask_image")}
@@ -539,13 +578,8 @@ class PaintToolDiffuse(QtCore.QObject):
                 "generator": seed,
                 "init_image": self._qimage_to_data_url(img),
             }
-            if self._mask_image_provider:
-                m = self._mask_image_provider()
-                if m and not m.isNull():
-                    if m.size() != img.size():
-                        m = m.scaled(img.size(), QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                                     QtCore.Qt.TransformationMode.SmoothTransformation)
-                    inputs["mask_image"] = self._qimage_to_data_url(m)
+            if mask_to_send is not None:
+                inputs["mask_image"] = self._qimage_to_data_url(mask_to_send)
             loras = self._selected_loras()
             log_params = {k: v for k, v in inputs.items() if k not in ("init_image", "mask_image")}
             if loras:
@@ -553,89 +587,24 @@ class PaintToolDiffuse(QtCore.QObject):
             self.log_prompt_request("sdxl_i2i", prompt, params=log_params)
             self._submit_job(model_id=model_id, operation="i2i", inputs=inputs, loras=loras)
 
-    def _submit_job(self, model_id: str, operation: str, inputs: dict, loras: List[str]):
-        self._set_busy(True)
-        try:
-            gen = inputs.get("generator")
-            if isinstance(gen, int):
-                self._last_used_seed = int(gen)
-            payload = {
-                "modelId": model_id,
-                "operation": operation,
-                "inputs": inputs,
-            }
-            if loras:
-                payload["loras"] = loras
-            res = self._post_json(f"{self._api_base}/jobs/submit", payload)
-            jid = (res or {}).get("job_id")
-            if not jid:
-                raise RuntimeError("missing job_id")
-            self._job_id = jid
-            if self._progress_timer is None:
-                self._progress_timer = QtCore.QTimer(self._options_widget)
-                self._progress_timer.setInterval(250)
-                self._progress_timer.timeout.connect(self._poll_progress)
-            if not self._progress_timer.isActive():
-                self._progress_timer.start()
-            self.pb_progress.setValue(0)
-            if self.lbl_stage:
-                self.lbl_stage.setText("Submitted")
-        except Exception as ex:
-            self._set_busy(False)
-            self._emit_error(str(ex))
-            if self.lbl_stage:
-                self.lbl_stage.setText("Error")
+        # Do not turn off mask mode here; wait for image return
 
-    def _poll_progress(self):
-        if not self._job_id:
-            return
-        try:
-            res = self._get_json(f"{self._api_base}/progress/{self._job_id}")
-        except Exception:
-            if self._tool_callback:
-                self._tool_callback("error", "Server not found")
-            if self.lbl_stage:
-                self.lbl_stage.setText("Server unreachable")
-            return
-        pct = int(res.get("percent", 0))
-        self.pb_progress.setValue(pct)
-        # Update stage/status text
-        stage_txt = res.get("status_text") or res.get("status") or ""
-        if self.lbl_stage:
-            self.lbl_stage.setText(stage_txt)
-        st = res.get("status")
-        if st == "done":
-            if self._progress_timer and self._progress_timer.isActive():
-                self._progress_timer.stop()
-            self._job_id = None
-            data_url = res.get("image_data_url", "")
-            out = self._save_data_url_image(data_url, self._current_path)
-            self._set_busy(False)
-            if out:
-                if self._tool_callback:
-                    self._tool_callback("save", str(out))
-                if self._canvas:
-                    if hasattr(self._canvas, "set_pixmap"):
-                        pm = QtGui.QPixmap(str(out))
-                        self._canvas.set_pixmap(pm)
-                    if hasattr(self._canvas, "clear_overlay"):
-                        self._canvas.clear_overlay()
-                    if hasattr(self._canvas, "_mask_overlay"):
-                        self._canvas._mask_overlay = None
-                if self.lbl_stage:
-                    self.lbl_stage.setText("Done")
-            else:
-                self._emit_error("Invalid image data")
-                if self.lbl_stage:
-                    self.lbl_stage.setText("Error")
-        elif st == "error":
-            if self._progress_timer and self._progress_timer.isActive():
-                self._progress_timer.stop()
-            self._job_id = None
-            self._set_busy(False)
-            self._emit_error(res.get("error", "Unknown error"))
-            if self.lbl_stage:
-                self.lbl_stage.setText("Error")
+    def _qt_blur_image(self, img: QtGui.QImage, radius: int) -> QtGui.QImage:
+        # Fallback blur using QGraphicsBlurEffect if QImage.blur is not available
+        from PyQt6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem, QGraphicsBlurEffect
+        pm = QtGui.QPixmap.fromImage(img)
+        scene = QGraphicsScene()
+        item = QGraphicsPixmapItem(pm)
+        blur = QGraphicsBlurEffect()
+        blur.setBlurRadius(radius)
+        item.setGraphicsEffect(blur)
+        scene.addItem(item)
+        result_pm = QtGui.QPixmap(pm.size())
+        result_pm.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(result_pm)
+        scene.render(painter)
+        painter.end()
+        return result_pm.toImage()
 
     # ---------- Model / LoRA UI ----------
     def _refresh_model_combo(self):
@@ -899,3 +868,96 @@ class PaintToolDiffuse(QtCore.QObject):
                             splitter.setSizes([int(w * 0.4), int(w * 0.6)])
                             self._split_ratio_applied = True
         return super().eventFilter(obj, event)
+
+    def _submit_job(self, model_id: str, operation: str, inputs: dict, loras: List[str]):
+        self._set_busy(True)
+        try:
+            gen = inputs.get("generator")
+            if isinstance(gen, int):
+                self._last_used_seed = int(gen)
+            payload = {
+                "modelId": model_id,
+                "operation": operation,
+                "inputs": inputs,
+                "mask_active": self.mask_active,
+            }
+            if loras:
+                payload["loras"] = loras
+            res = self._post_json(f"{self._api_base}/jobs/submit", payload)
+            jid = (res or {}).get("job_id")
+            if not jid:
+                raise RuntimeError("missing job_id")
+            self._job_id = jid
+            if self._progress_timer is None:
+                self._progress_timer = QtCore.QTimer(self._options_widget)
+                self._progress_timer.setInterval(250)
+                self._progress_timer.timeout.connect(self._poll_progress)
+            if not self._progress_timer.isActive():
+                self._progress_timer.start()
+            self.pb_progress.setValue(0)
+            if self.lbl_stage:
+                self.lbl_stage.setText("Submitted")
+        except Exception as ex:
+            self._set_busy(False)
+            self._emit_error(str(ex))
+            if self.lbl_stage:
+                self.lbl_stage.setText("Error")
+
+    def _poll_progress(self):
+        """
+        Polls the server for job progress and updates the progress bar and status label.
+        """
+        if not self._job_id:
+            return
+        try:
+            res = self._get_json(f"{self._api_base}/progress/{self._job_id}")
+        except Exception:
+            if self._tool_callback:
+                self._tool_callback("error", "Server not found")
+            if self.lbl_stage:
+                self.lbl_stage.setText("Server unreachable")
+            return
+        pct = int(res.get("percent", 0))
+        self.pb_progress.setValue(pct)
+        # Update stage/status text
+        stage_txt = res.get("status_text") or res.get("status") or ""
+        if self.lbl_stage:
+            self.lbl_stage.setText(stage_txt)
+        st = res.get("status")
+        if st == "done":
+            if self._progress_timer and self._progress_timer.isActive():
+                self._progress_timer.stop()
+            self._job_id = None
+            data_url = res.get("image_data_url", "")
+            out = self._save_data_url_image(data_url, self._current_path)
+            self._set_busy(False)
+            if out:
+                if self._tool_callback:
+                    self._tool_callback("save", str(out))
+                if self._canvas:
+                    if hasattr(self._canvas, "set_pixmap"):
+                        pm = QtGui.QPixmap(str(out))
+                        self._canvas.set_pixmap(pm)
+                    if hasattr(self._canvas, "clear_overlay"):
+                        self._canvas.clear_overlay()
+                    if hasattr(self._canvas, "_mask_overlay"):
+                        self._canvas._mask_overlay = None
+                    if hasattr(self._canvas, "set_mask_visible"):
+                        self._canvas.set_mask_visible(False)
+                if self.lbl_stage:
+                    self.lbl_stage.setText("Done")
+                # Turn off mask mode after image is returned
+                if self._tool_callback:
+                    self._tool_callback("mask_active", False)
+            else:
+                self._emit_error("Invalid image data")
+                if self.lbl_stage:
+                    self.lbl_stage.setText("Error")
+        elif st == "error":
+            if self._progress_timer and self._progress_timer.isActive():
+                self._progress_timer.stop()
+            self._job_id = None
+            self._set_busy(False)
+            self._emit_error(res.get("error", "Unknown error"))
+            if self.lbl_stage:
+                self.lbl_stage.setText("Error")

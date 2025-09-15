@@ -232,22 +232,22 @@ class PaintToolSelection(QtCore.QObject):
             canvas.update()
 
         elif event_type == "release":
-            if left_down:
-                if s.defining:
-                    s.defining = False
-                    if s.rect_img.width() > 2 and s.rect_img.height() > 2:
-                        s.active = True
-                        s.activeChanged.emit(True)
-                        self._update_sprite(canvas)  # capture base sprite
-                    else:
-                        s.active = False
-                        s.rect_img = QtCore.QRectF()
-                        s.sprite = None
-                        s.base_rect_img = QtCore.QRectF()
-                        s.base_sprite = None
-                        s.rotation_deg = 0.0
-                elif s.dragging:
-                    s.dragging = False
+            # Always finalize selection/drag on mouse release
+            if s.defining:
+                s.defining = False
+                if s.rect_img.width() > 2 and s.rect_img.height() > 2:
+                    s.active = True
+                    s.activeChanged.emit(True)
+                    self._update_sprite(canvas)  # capture base sprite
+                else:
+                    s.active = False
+                    s.rect_img = QtCore.QRectF()
+                    s.sprite = None
+                    s.base_rect_img = QtCore.QRectF()
+                    s.base_sprite = None
+                    s.rotation_deg = 0.0
+            if s.dragging:
+                s.dragging = False
             canvas.update()
 
     def cursorFor(self, canvas) -> Optional[QtGui.QCursor]:

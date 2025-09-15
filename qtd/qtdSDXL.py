@@ -164,8 +164,11 @@ class SDXLBackend(Backend):
             if not base_loaded:
                 set_progress(1)          # loading_model start
                 if set_status: set_status("Loading model")
-            self._init_pipeline(model_path, pipe_kind=("text" if op == "t2i" else "i2i"),
-                                progress_cb=(set_progress if not base_loaded else None))
+            self._init_pipeline(
+                model_path,
+                pipe_kind=("text" if op == "t2i" else "i2i"),
+                progress_cb=(set_progress if not base_loaded else None)
+)
             if not base_loaded:
                 set_progress(6)          # after model load
                 if set_status: set_status("Model loaded")
@@ -214,6 +217,7 @@ class SDXLBackend(Backend):
                 call_kwargs["callback_on_step_end"] = _on_step_end
                 call_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
                 out = self._pipe_text(**call_kwargs).images[0]
+                print(f"[qtd][sdxl][result] T2I returned image size: {out.size}")
                 data_url = pil_to_data_url(out)
                 set_progress(100)
                 if set_status: set_status("Finalizing")
@@ -229,17 +233,22 @@ class SDXLBackend(Backend):
             try:
                 # Decode the image first, without resizing.
                 init_img = decode_data_url_to_pil(init_image_url)
-                if init_img.size != (width, height):
-                    print(f"[qtd][sdxl][alert] WARNING: SDXL pipeline will resize image from {init_img.size} to ({width}, {height}) due to pipeline requirements.")
+                orig_size = init_img.size  # Save original size
+                print(f"[qtd][sdxl][alert] WARNING: SDXL pipeline will resize image from {init_img.size} to ({width}, {height}) due to pipeline requirements.")
                 width, height = init_img.size
             except Exception as e:
                 set_error(f"invalid init_image: {e}")
                 return
 
             out_img = None
+            mask_active = bool(inputs.get("mask_active", False))  # <-- Read flag
             mask_url = (inputs or {}).get("mask_image")
-            # Pass the correct, non-resized dimensions to the mask decoder.
-            mask_img = decode_and_resize_mask(mask_url, width, height) if mask_url else None
+            mask_img = None
+            if mask_active and mask_url:
+                mask_img = decode_and_resize_mask(mask_url, width, height)
+            # else: mask_img remains None
+
+            # Only pass mask_img if mask_active and mask_img is not None
             if mask_img is not None:
                 try:
                     from diffusers import AutoPipelineForInpainting
@@ -249,18 +258,25 @@ class SDXLBackend(Backend):
                         prompt=prompt,
                         negative_prompt=self._NEG_PROMPT,
                         image=init_img,
-                        mask_image=mask_img,
                         strength=max(0.0, min(1.0, strength)),
                         num_inference_steps=steps,
                         guidance_scale=guidance,
                         generator=gen,
                     )
+                    if mask_img is not None:
+                        # Optionally, check if mask_img is not blank here
+                        inpaint_kwargs["mask_image"] = mask_img
                     def _on_step_end_ip(pipeline, step, timestep, callback_kwargs):
                         gen_progress(step, timestep, callback_kwargs.get("latents"))
                         return callback_kwargs
                     inpaint_kwargs["callback_on_step_end"] = _on_step_end_ip
                     inpaint_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
+
+                    # Print the actual kwargs used for the inpaint pipeline call
+                    print(f"[qtd][sdxl][i2i][inpaint] Pipeline call kwargs: {inpaint_kwargs}")
+
                     out_img = pin(**inpaint_kwargs).images[0]
+                    print(f"[qtd][sdxl][result] I2I (inpaint) returned image size: {out_img.size}")
                 except Exception:
                     out_img = None
             if out_img is None:
@@ -278,7 +294,18 @@ class SDXLBackend(Backend):
                     return callback_kwargs
                 call_kwargs["callback_on_step_end"] = _on_step_end_i2i
                 call_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
+
+                # Print the actual kwargs used for the pipeline call
+                print(f"[qtd][sdxl][i2i] Pipeline call kwargs: {call_kwargs}")
+
                 out_img = self._pipe_i2i(**call_kwargs).images[0]
+                print(f"[qtd][sdxl][result] I2I returned image size: {out_img.size}")
+
+            # --- Resize output to original input size if needed ---
+            if out_img.size != orig_size:
+                print(f"[qtd][sdxl][resize] Resizing output from {out_img.size} to original {orig_size}")
+                out_img = out_img.resize(orig_size, Image.Resampling.LANCZOS)
+
             data_url = pil_to_data_url(out_img)
             set_progress(100)
             if set_status: set_status("Finalizing")

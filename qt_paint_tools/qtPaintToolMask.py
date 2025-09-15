@@ -32,6 +32,7 @@ class PaintToolMask(QtCore.QObject):
 
     def __init__(self):
         super().__init__()
+        print("[DEBUG] PaintToolMask loaded from", __file__)
         self._brush_size = 24
         self._canvas = None
         self._update_cursor_cb: Optional[Callable] = None
@@ -41,11 +42,13 @@ class PaintToolMask(QtCore.QObject):
         self._options_widget: Optional[QtWidgets.QWidget] = None
         self._cb_erase: Optional[QtWidgets.QCheckBox] = None
         self._btn_clear: Optional[QtWidgets.QPushButton] = None
+        self._tool_callback: Optional[Callable[[str, str | bool], None]] = None
 
     def button_name(self) -> str:
         return "Mask"
 
     def create_options_widget(self) -> QtWidgets.QWidget:
+        print("Create options widget started")
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(widget)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -71,6 +74,7 @@ class PaintToolMask(QtCore.QObject):
         update_cursor_cb: Callable,
         stamp_cb: Callable,
         tool_callback: Optional[Callable[[str, str | bool], None]] = None,
+        mask_active: bool = False,
     ) -> dict:
         if canvas is None:
             print("[PaintToolMask] ERROR: canvas is None in on_selected")
@@ -86,9 +90,15 @@ class PaintToolMask(QtCore.QObject):
         self._update_cursor_cb = update_cursor_cb
         self._stamp_cb = stamp_cb
         self._tool_callback = tool_callback
-        # Ensure mask layer is visible when mask tool is selected
+        # Always set mask layer visible when mask tool is selected
         if hasattr(self._canvas, "set_mask_visible"):
             self._canvas.set_mask_visible(True)
+        # Always set mask_active to True when mask tool is selected
+        if self._tool_callback:
+            self._tool_callback("mask_active", True)
+        # Ensure the mask checkbox is checked when mask tool is entered
+        if self._cb_erase is not None:
+            self._cb_erase.setChecked(False)
         self._update_cursor()
         return {
             "display_brush_controls": self.display_brush_controls,
@@ -104,8 +114,12 @@ class PaintToolMask(QtCore.QObject):
         self._update_cursor()
 
     def _on_erase_toggled(self, checked: bool):
+        print("[DEBUG] _on_erase_toggled called")
         self._erase_mode = checked
         self._update_cursor()
+        # Optionally notify parent about erase mode change
+        # if self._tool_callback:
+        #     self._tool_callback("mask_erase", checked)
 
     def _on_clear_clicked(self):
         self.clear_mask()
@@ -123,7 +137,7 @@ class PaintToolMask(QtCore.QObject):
                 border_width=2,
             )
         else:
-            pm = make_brush_cursor(size, QtGui.QColor(255, 255, 255, 180))
+            pm = make_brush_cursor(size, QtGui.QColor(255, 128, 192, 180))  # Transparent pink
         self._update_cursor_cb(pm, size // 2, size // 2)
 
     def on_mouse_event(
@@ -158,7 +172,7 @@ class PaintToolMask(QtCore.QObject):
         if self._erase_mode:
             p.setBrush(QtGui.QBrush(QtCore.Qt.GlobalColor.transparent))
         else:
-            p.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 255)))
+            p.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 255)))  # Opaque white
         p.drawEllipse(QtCore.QRectF(0, 0, dia_img, dia_img))
         p.end()
         self._stamp_cb(circ, top_left, self._erase_mode, layer="mask")
@@ -178,5 +192,6 @@ class PaintToolMask(QtCore.QObject):
             and hasattr(self._canvas, "_mask_overlay")
             and self._canvas._mask_overlay is not None
         ):
-            self._canvas._mask_overlay.fill(0)
+            # Fill with transparent (fully clear) using correct blending mode
+            self._canvas._mask_overlay.fill(0)  # ARGB32: 0 = fully transparent
             self._canvas.update()

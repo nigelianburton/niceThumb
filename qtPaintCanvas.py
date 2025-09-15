@@ -5,7 +5,6 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from qtPaintHelpers import aspect_fit_rect, widget_to_image_point
 
-
 class PaintCanvas(QtWidgets.QWidget):
     mouseEventCallback: Optional[Callable[[str, QtCore.QPoint, bool, bool], None]] = None
 
@@ -16,7 +15,7 @@ class PaintCanvas(QtWidgets.QWidget):
         self._mask_overlay: Optional[QtGui.QImage] = None
         self._tool = None
         self._sel_state = None
-        self.setMouseTracking(True)
+        self._mask_visible = False  # Default is off
 
     def set_pixmap(self, pixmap: Optional[QtGui.QPixmap]):
         self._pixmap = pixmap.copy() if pixmap else None
@@ -25,7 +24,7 @@ class PaintCanvas(QtWidgets.QWidget):
             self._overlay = QtGui.QImage(size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
             self._overlay.fill(0)
             self._mask_overlay = QtGui.QImage(size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
-            self._mask_overlay.fill(0)
+            self._mask_overlay.fill(0)  # Fully transparent
         else:
             self._overlay = None
             self._mask_overlay = None
@@ -48,6 +47,19 @@ class PaintCanvas(QtWidgets.QWidget):
 
     def get_mask_image(self) -> Optional[QtGui.QImage]:
         return self._mask_overlay
+
+    def clear_mask(self):
+        """Clears the mask overlay."""
+        if self._mask_overlay is not None and not self._mask_overlay.isNull():
+            self._mask_overlay.fill(0)  # Fully transparent
+            self.update()
+
+    def is_mask_visible(self) -> bool:
+        return self._mask_visible
+
+    def set_mask_visible(self, visible: bool):
+        self._mask_visible = bool(visible)
+        self.update()
 
     def resize_canvas(self, new_w: int, new_h: int, dest_x: int, dest_y: int, fill_color: QtGui.QColor):
         """
@@ -78,7 +90,7 @@ class PaintCanvas(QtWidgets.QWidget):
         if self._mask_overlay and not self._mask_overlay.isNull():
             old_mask = self._mask_overlay
             self._mask_overlay = QtGui.QImage(new_w, new_h, old_mask.format())
-            self._mask_overlay.fill(0)  # Transparent
+            self._mask_overlay.fill(0)  # Fully transparent
             p_mask = QtGui.QPainter(self._mask_overlay)
             p_mask.drawImage(dest_x, dest_y, old_mask)
             p_mask.end()
@@ -117,8 +129,9 @@ class PaintCanvas(QtWidgets.QWidget):
         if self._overlay is not None and not self._overlay.isNull():
             p.drawImage(frame, self._overlay)
 
-        if self._mask_overlay is not None and not self._mask_overlay.isNull():
-            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Multiply)
+        if self._mask_visible and self._mask_overlay is not None and not self._mask_overlay.isNull():
+            print("[PaintCanvas] Drawing mask overlay")  # Add this line
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
             p.drawImage(frame, self._mask_overlay)
             p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
 

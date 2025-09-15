@@ -37,6 +37,7 @@ class PaintToolBlur(QtCore.QObject):
 
     def __init__(self):
         super().__init__()
+        print("[DEBUG] PaintToolBlur loaded from", __file__)
         self._brush_size = 24
         self._blur_strength = 1.0
         self._canvas = None

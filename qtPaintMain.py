@@ -85,6 +85,7 @@ class PaintView(QtWidgets.QWidget):
         self._active_tool: str = "paint"
         self._active_tool_obj: Optional[Any] = None
         self._tool_callback = self._on_tool_event
+        self.mask_active = False  # <-- Add this line
         self._build_ui()
         self._tool_map = {
             "paint": PaintToolPaint(),
@@ -103,6 +104,12 @@ class PaintView(QtWidgets.QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # Create image_canvas FIRST
+        self.image_canvas = PaintCanvas()
+        self.image_canvas.setMouseTracking(True)
+        self.image_canvas.mouseEventCallback = self._on_canvas_mouse_event
+        self.image_canvas.installEventFilter(self)
+
         toolbar = QtWidgets.QWidget()
         toolbar.setFixedHeight(PAINT_TOOLBAR_HEIGHT_PX)
         tlay = QtWidgets.QHBoxLayout(toolbar)
@@ -112,13 +119,12 @@ class PaintView(QtWidgets.QWidget):
         self.brush_controls = BrushControlsWidget(
             initial_size=self._brush_size, min_size=BRUSH_MIN,
             max_size=BRUSH_MAX, preview_size=BRUSH_PREVIEW_SIZE_PX
-        )
+)
         self.brush_controls.sizeChanged.connect(self._on_brush_size_changed)
 
         self.palette_widget = ToolPaletteWidget(PALETTE, initial_color=self._brush_color)
         self.palette_widget.colorSelected.connect(self._on_brush_color_changed)
 
-        # Added "Size" before "Diffuse"
         self.tools_widget = ToolsWidget(["Paint", "Mask", "Blur", "Clone", "Select", "Size", "Diffuse"])
         self.tools_widget.toolSelected.connect(self._on_tool_selected)
 
@@ -144,13 +150,14 @@ class PaintView(QtWidgets.QWidget):
         tlay.addWidget(self.actions_widget)
         tlay.addStretch(1)
 
-        self.image_canvas = PaintCanvas()
-        self.image_canvas.setMouseTracking(True)
-        self.image_canvas.mouseEventCallback = self._on_canvas_mouse_event
-        self.image_canvas.installEventFilter(self)
+        # --- Add Mask Active Checkbox at the bottom of the toolbar ---
+        self.cb_mask_active = QtWidgets.QCheckBox("Mask Active")
+        self.cb_mask_active.setChecked(False)  # Default is off
+        self.cb_mask_active.toggled.connect(self._on_mask_active_toggled)
 
         root.addWidget(toolbar, 0)
         root.addWidget(self.image_canvas, 1)
+        root.addWidget(self.cb_mask_active, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
         self._update_brush_preview()
 
     def set_path(self, path: Optional[Path]):
@@ -178,6 +185,12 @@ class PaintView(QtWidgets.QWidget):
         n = (name or "").lower()
         self._active_tool = n
         self._active_tool_obj = self._tool_map.get(n)
+        # Sync Mask checkbox with tool selection
+        if hasattr(self, "cb_mask_active"):
+            if n == "mask":
+                self.cb_mask_active.setChecked(True)
+            else:
+                self.cb_mask_active.setChecked(False)
         # Setup tool options UI
         options_widget = self._active_tool_obj.create_options_widget() if self._active_tool_obj else self.page_empty
         if options_widget is None:
@@ -225,6 +238,7 @@ class PaintView(QtWidgets.QWidget):
                 "update_cursor_cb": self._set_cursor_sprite,
                 "stamp_cb": self._on_stamp_request,
                 "tool_callback": self._tool_callback,
+                "mask_active": self.mask_active,  # <-- Pass the flag
             }
         elif self._active_tool == "clone":
             params = {
@@ -242,6 +256,7 @@ class PaintView(QtWidgets.QWidget):
                 "compose_image_provider": self._compose_current_image,
                 "mask_image_provider": self._get_mask_image,
                 "tool_callback": self._tool_callback,
+                "mask_active": self.mask_active,  # <-- Add this
             }
         elif self._active_tool == "select":
             params = {
@@ -256,9 +271,10 @@ class PaintView(QtWidgets.QWidget):
                 "tool_callback": self._tool_callback,
             }
 
-        print(f"[PaintView] Activating tool: {self._active_tool}")
-        for k, v in params.items():
-            print(f"[PaintView] Param {k}: {type(v)} -> {v}")
+        # if DETAILED_LOG:
+        #     print(f"[PaintView] Activating tool: {self._active_tool}")
+        #     for k, v in params.items():
+        #         print(f"[PaintView] Param {k}: {type(v)} -> {v}")
 
         # Wire active tool into canvas so paintOverlay is invoked.
         try:
@@ -274,6 +290,12 @@ class PaintView(QtWidgets.QWidget):
             print(f"[PaintView] Warning: failed to attach tool to canvas: {e}")
 
         self._active_tool_obj.on_selected(**params)
+        # Sync checkbox after widget is created
+        if self._active_tool == "mask":
+            mask_tool = self._active_tool_obj
+            if hasattr(mask_tool, "_cb_mask_active") and mask_tool._cb_mask_active is not None:
+                mask_tool._cb_mask_active.setChecked(self.mask_active)
+
         self._update_brush_preview()
 
     def _on_brush_size_changed(self, size: int):
@@ -302,15 +324,8 @@ class PaintView(QtWidgets.QWidget):
         layer = kwargs.get("layer", "paint")
         if args:
             erase = bool(args[0])
-        if DETAILED_LOG:
-            print(f"[PaintView] Stamp request: pos={pos} erase={erase} layer={layer}")
         if layer == "mask":
             overlay = getattr(self.image_canvas, "_mask_overlay", None)
-            if overlay is None or overlay.isNull():
-                overlay = QtGui.QImage(self.image_canvas._pixmap.size(),
-                                       QtGui.QImage.Format.Format_ARGB32_Premultiplied)
-                overlay.fill(0)
-                self.image_canvas._mask_overlay = overlay
         else:
             overlay = getattr(self.image_canvas, "_overlay", None)
             if overlay is None or overlay.isNull():
@@ -365,7 +380,9 @@ class PaintView(QtWidgets.QWidget):
             self.brush_controls.set_preview_pixmap(pm)
             return
         elif self._active_tool == "clone":
-            sprite = self.image_canvas.get_cursor_sprite()
+            sprite = None
+            if hasattr(self._active_tool_obj, "get_cursor_sprite"):
+                sprite = self._active_tool_obj.get_cursor_sprite()
             if sprite:
                 pm = draw_brush_preview(sprite, BRUSH_PREVIEW_SIZE_PX, QtGui.QColor("yellow"))
             else:
@@ -434,6 +451,14 @@ class PaintView(QtWidgets.QWidget):
         self.canceled.emit()
 
     def _on_tool_event(self, event: str, value: str | bool):
+        if event == "mask_active":
+            self.mask_active = bool(value)
+            # Optionally, update the mask tool's checkbox if active
+            if self._active_tool == "mask":
+                mask_tool = self._active_tool_obj
+                if hasattr(mask_tool, "_cb_mask_active") and mask_tool._cb_mask_active is not None:
+                    mask_tool._cb_mask_active.setChecked(self.mask_active)
+            return
         if event == "error":
             QtWidgets.QMessageBox.critical(self, "Tool Error", str(value))
             return
@@ -533,3 +558,17 @@ class PaintView(QtWidgets.QWidget):
                     event.accept()
                     return True
         return super().eventFilter(obj, event)
+
+    def _on_mask_active_toggled(self, checked: bool):
+        self.mask_active = checked
+        # Only show/hide mask overlay, do NOT change tool mode
+        if hasattr(self.image_canvas, "set_mask_visible"):
+            self.image_canvas.set_mask_visible(checked)
+        # --- Ensure Diffuse tool is updated if active ---
+        if self._active_tool == "diffuse" and self._active_tool_obj:
+            # Update mask_active property directly
+            if hasattr(self._active_tool_obj, "mask_active"):
+                self._active_tool_obj.mask_active = checked
+            # Optionally, notify the tool via callback if needed
+            if hasattr(self._active_tool_obj, "_tool_callback") and self._active_tool_obj._tool_callback:
+                self._active_tool_obj._tool_callback("mask_active", checked)
