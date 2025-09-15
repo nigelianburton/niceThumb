@@ -1,0 +1,9 @@
+name: niceThumb
+channels:
+  - defaults
+dependencies:
+  - python
+  - flask
+  - gradio
+  - pip
+prefix: C:\Users\nigel\miniconda3\envs\niceThumb
