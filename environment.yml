@@ -1,6 +1,7 @@
 name: niceThumb
 channels:
   - defaults
+  - conda-forge
 dependencies:
   - python
   - flask
