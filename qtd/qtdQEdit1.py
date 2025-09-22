@@ -41,50 +41,6 @@ except Exception:
         _qt_blur = None
 
 # -------------------------------------------------------------------
-# Configuration Flags & Environment Overrides
-# -------------------------------------------------------------------
-
-# Use local preloaded model directory (else fallback to HF hub)
-USE_PRELOADED_QWEN_EDIT = True
-
-# Highest priority path overrides for model root
-PRELOADED_QWEN_EDIT_PATH = (
-    os.environ.get("QWEN_IMAGE_EDIT_DIR")
-    or os.environ.get("QWEN_MODEL_LOCAL_DIR")
-    or r"C:\_MODELS-SD\Qwen\Qwen-Image-Edit"
-)
-
-# Precision flags (match polishTest defaults previously discussed)
-# False => 4-bit quantization for that component; True => full bf16 precision
-USE_HIGH_PRECISION_VISION = False
-USE_HIGH_PRECISION_TEXT = True
-
-# Lightning LoRA configuration
-LIGHTNING_LORA_DIR = os.environ.get("QWEN_LIGHTNING_DIR", r"C:\_CONDA\niceThumb\Qwen-Image-Lightning")
-LIGHTNING_LORA_FILENAME = os.environ.get("QWEN_LIGHTNING_LORA", "Qwen-Image-Lightning-8steps-V1.1.safetensors")
-
-# Additional LoRA directory & list (multi-adapter)
-ADDITIONAL_LORA_DIR = os.environ.get("QWEN_EXTRA_LORA_DIR", r"C:\_MODELS-SD\Qwen\Qwen-Lora")
-ADDITIONAL_LORAS: List[str] = []  # e.g. ["myStyle.safetensors"]
-_env_extra = os.environ.get("QWEN_EXTRA_LORAS", "")
-if _env_extra.strip():
-    for _n in [x.strip() for x in _env_extra.split(",") if x.strip()]:
-        if _n not in ADDITIONAL_LORAS:
-            ADDITIONAL_LORAS.append(_n)
-
-# Verbose logging (GPU/time/step) toggle
-VERBOSE_QWEN1 = True
-
-# Target normalization area (matches polishTest)
-TARGET_AREA = 1024 * 1024  # 1,048,576
-
-# Default inference steps (if client omits)
-DEFAULT_STEPS = 8
-
-# HF fallback model id
-HF_MODEL_ID = "Qwen/Qwen-Image-Edit"
-
-# -------------------------------------------------------------------
 # Protocol Types (server expects this shape)
 # -------------------------------------------------------------------
 ProgressFn = Callable[[int], None]
@@ -109,11 +65,39 @@ try:
         pil_to_data_url, bf16_supported, empty_cuda_cache,
         resize_to_area_preserve_aspect, ensure_rgb, patch_scheduler_progress
     )
+    from .qtdConstants import (  # type: ignore
+        QWEN_USE_PRELOADED,
+        QWEN_PRELOADED_PATH,
+        QWEN_USE_HIGH_PRECISION_VISION,
+        QWEN_USE_HIGH_PRECISION_TEXT,
+        QWEN_LIGHTNING_LORA_DIR,
+        QWEN_LIGHTNING_LORA_FILENAME,
+        QWEN_ADDITIONAL_LORA_DIR,
+        QWEN_ADDITIONAL_LORAS,
+        QWEN_VERBOSE,
+        QWEN_TARGET_AREA,
+        QWEN_DEFAULT_STEPS,
+        QWEN_HF_MODEL_ID,
+    )
 except ImportError:
     from qtdHelpers import (  # type: ignore
         list_safetensors, resolve_in_dir, seed_from_inputs, decode_data_url_to_pil,
         pil_to_data_url, bf16_supported, empty_cuda_cache,
         resize_to_area_preserve_aspect, ensure_rgb, patch_scheduler_progress
+    )
+    from qtdConstants import (  # type: ignore
+        QWEN_USE_PRELOADED,
+        QWEN_PRELOADED_PATH,
+        QWEN_USE_HIGH_PRECISION_VISION,
+        QWEN_USE_HIGH_PRECISION_TEXT,
+        QWEN_LIGHTNING_LORA_DIR,
+        QWEN_LIGHTNING_LORA_FILENAME,
+        QWEN_ADDITIONAL_LORA_DIR,
+        QWEN_ADDITIONAL_LORAS,
+        QWEN_VERBOSE,
+        QWEN_TARGET_AREA,
+        QWEN_DEFAULT_STEPS,
+        QWEN_HF_MODEL_ID,
     )
 
 # -------------------------------------------------------------------
@@ -121,7 +105,7 @@ except ImportError:
 # -------------------------------------------------------------------
 
 def _gpu_mem(torch_mod) -> str:
-    if not VERBOSE_QWEN1: return ""
+    if not QWEN_VERBOSE: return ""
     try:
         if torch_mod is None or not torch_mod.cuda.is_available():
             return "CUDA not available"
@@ -133,21 +117,21 @@ def _gpu_mem(torch_mod) -> str:
         return f"mem? ({e})"
 
 def _vprint(msg: str):
-    if VERBOSE_QWEN1:
+    if QWEN_VERBOSE:
         print(msg)
 
 def _log_step(label: str, start_time: float, torch_mod):
-    if not VERBOSE_QWEN1: return
+    if not QWEN_VERBOSE: return
     elapsed = time.time() - start_time
     print(f"[backend][qwen1][load] {label} | {elapsed:.2f}s | GPU: {_gpu_mem(torch_mod)}")
 
 def _resize_to_target(image: Image.Image) -> Image.Image:
     width, height = image.size
     orig_area = width * height
-    if width % 4 == 0 and height % 4 == 0 and orig_area == TARGET_AREA:
+    if width % 4 == 0 and height % 4 == 0 and orig_area == QWEN_TARGET_AREA:
         return image
     aspect = width / height
-    scale = math.sqrt(TARGET_AREA / orig_area)
+    scale = math.sqrt(QWEN_TARGET_AREA / orig_area)
     ideal_w = width * scale
     def mult4(x: float) -> int: return max(4, int(round(x / 4.0)) * 4)
     w_floor = max(4, (int(ideal_w) // 4) * 4)
@@ -162,7 +146,7 @@ def _resize_to_target(image: Image.Image) -> Image.Image:
         for h_c in {h_floor, h_ceil, mult4(h_ideal)}:
             if h_c <= 0: continue
             area = w_c * h_c
-            candidates.append((abs(area - TARGET_AREA), abs((w_c / h_c) - aspect), area, w_c, h_c))
+            candidates.append((abs(area - QWEN_TARGET_AREA), abs((w_c / h_c) - aspect), area, w_c, h_c))
     candidates.sort()
     _, _, _, new_w, new_h = candidates[0]
     if new_w == width and new_h == height:
@@ -185,10 +169,10 @@ class QwenEdit1Backend(Backend):
 
     def describe_models(self) -> List[Dict[str, Any]]:
         tags = ["qwen", "edit"]
-        if not USE_HIGH_PRECISION_VISION: tags.append("vision-4bit")
-        if not USE_HIGH_PRECISION_TEXT: tags.append("text-4bit")
-        if USE_HIGH_PRECISION_VISION or USE_HIGH_PRECISION_TEXT: tags.append("mixed-precision")
-        if LIGHTNING_LORA_FILENAME: tags.append("lightning")
+        if not QWEN_USE_HIGH_PRECISION_VISION: tags.append("vision-4bit")
+        if not QWEN_USE_HIGH_PRECISION_TEXT: tags.append("text-4bit")
+        if QWEN_USE_HIGH_PRECISION_VISION or QWEN_USE_HIGH_PRECISION_TEXT: tags.append("mixed-precision")
+        if QWEN_LIGHTNING_LORA_FILENAME: tags.append("lightning")
         # Expose both "t2i" (implemented via generated + blurred base image) and "edit"
         return [{
             "id": "qwen1:image-edit",
@@ -203,7 +187,7 @@ class QwenEdit1Backend(Backend):
                     "inputs": [
                         {"name": "prompt", "type": "string", "required": True},
                         {"name": "true_cfg_scale", "type": "float", "min": 0.0, "max": 20.0, "default": 1.0},
-                        {"name": "num_inference_steps", "type": "int", "min": 1, "max": 200, "default": DEFAULT_STEPS},
+                        {"name": "num_inference_steps", "type": "int", "min": 1, "max": 200, "default": QWEN_DEFAULT_STEPS},
                         {"name": "generator", "type": "int", "required": False},
                     ],
                 },
@@ -213,7 +197,7 @@ class QwenEdit1Backend(Backend):
                     "inputs": [
                         {"name": "prompt", "type": "string", "required": True},
                         {"name": "true_cfg_scale", "type": "float", "min": 0.0, "max": 20.0, "default": 1.0},
-                        {"name": "num_inference_steps", "type": "int", "min": 1, "max": 200, "default": DEFAULT_STEPS},
+                        {"name": "num_inference_steps", "type": "int", "min": 1, "max": 200, "default": QWEN_DEFAULT_STEPS},
                         {"name": "generator", "type": "int", "required": False},
                         {"name": "init_image", "type": "image", "required": False},
                     ],
@@ -225,15 +209,15 @@ class QwenEdit1Backend(Backend):
     def list_loras(self, model_id: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         try:
-            if os.path.isdir(LIGHTNING_LORA_DIR):
-                for f in list_safetensors(LIGHTNING_LORA_DIR):
-                    out.append({"name": f, "path": os.path.join(LIGHTNING_LORA_DIR, f), "tags": ["lightning"]})
+            if os.path.isdir(QWEN_LIGHTNING_LORA_DIR):
+                for f in list_safetensors(QWEN_LIGHTNING_LORA_DIR):
+                    out.append({"name": f, "path": os.path.join(QWEN_LIGHTNING_LORA_DIR, f), "tags": ["lightning"]})
         except Exception:
             print("[backend][qwen1][loras] lightning list failed"); traceback.print_exc()
         try:
-            if os.path.isdir(ADDITIONAL_LORA_DIR):
-                for f in list_safetensors(ADDITIONAL_LORA_DIR):
-                    out.append({"name": f, "path": os.path.join(ADDITIONAL_LORA_DIR, f), "tags": ["additional"]})
+            if os.path.isdir(QWEN_ADDITIONAL_LORA_DIR):
+                for f in list_safetensors(QWEN_ADDITIONAL_LORA_DIR):
+                    out.append({"name": f, "path": os.path.join(QWEN_ADDITIONAL_LORA_DIR, f), "tags": ["additional"]})
         except Exception:
             print("[backend][qwen1][loras] additional list failed"); traceback.print_exc()
         return out
@@ -276,7 +260,7 @@ class QwenEdit1Backend(Backend):
             return
 
         prompt = (inputs or {}).get("prompt") or ""
-        steps = int((inputs or {}).get("num_inference_steps") or DEFAULT_STEPS)
+        steps = int((inputs or {}).get("num_inference_steps") or QWEN_DEFAULT_STEPS)
         if steps < 1:
             steps = 1
         true_cfg_scale = float((inputs or {}).get("true_cfg_scale") or 1.0)
@@ -328,7 +312,7 @@ class QwenEdit1Backend(Backend):
                     return
             if image is not None:
                 if set_status: set_status("Resizing image")
-                image = resize_to_area_preserve_aspect(image, TARGET_AREA, multiple=4)
+                image = resize_to_area_preserve_aspect(image, QWEN_TARGET_AREA, multiple=4)
 
         if image is not None:
             if set_status: set_status("Normalizing channels")
@@ -468,7 +452,7 @@ class QwenEdit1Backend(Backend):
 
             if progress_cb: progress_cb(2)
             if status_cb: status_cb("Loading vision transformer")
-            if USE_HIGH_PRECISION_VISION:
+            if QWEN_USE_HIGH_PRECISION_VISION:
                 transformer = self._load_transformer(diff_mod, model_root, None, desired_dtype, local_only)
             else:
                 from diffusers import BitsAndBytesConfig as DiffBNB
@@ -483,7 +467,7 @@ class QwenEdit1Backend(Backend):
             if status_cb: status_cb("Vision loaded")
 
             if status_cb: status_cb("Loading text encoder")
-            if USE_HIGH_PRECISION_TEXT:
+            if QWEN_USE_HIGH_PRECISION_TEXT:
                 text_encoder = self._load_text_encoder(model_root, None, desired_dtype, local_only)
             else:
                 from transformers import BitsAndBytesConfig as HFBNB
@@ -584,9 +568,9 @@ class QwenEdit1Backend(Backend):
             self._diffusers = _diff
 
     def _resolve_model_id(self) -> str:
-        if USE_PRELOADED_QWEN_EDIT and os.path.isdir(PRELOADED_QWEN_EDIT_PATH):
-            return PRELOADED_QWEN_EDIT_PATH
-        return HF_MODEL_ID
+        if QWEN_USE_PRELOADED and os.path.isdir(QWEN_PRELOADED_PATH):
+            return QWEN_PRELOADED_PATH
+        return QWEN_HF_MODEL_ID
 
     def _load_transformer(self, diff_mod, model_root: str, quant_config, dtype, local_only: bool):
         from diffusers import QwenImageTransformer2DModel
@@ -612,9 +596,9 @@ class QwenEdit1Backend(Backend):
         return te.to("cpu")
 
     def _load_lightning_lora(self, pipe, start_time, torch_mod):
-        if not LIGHTNING_LORA_FILENAME:
+        if not QWEN_LIGHTNING_LORA_FILENAME:
             return
-        local_path = os.path.join(LIGHTNING_LORA_DIR, LIGHTNING_LORA_FILENAME)
+        local_path = os.path.join(QWEN_LIGHTNING_LORA_DIR, QWEN_LIGHTNING_LORA_FILENAME)
         loaded = False
         if os.path.isfile(local_path):
             try:
@@ -625,8 +609,8 @@ class QwenEdit1Backend(Backend):
                 _vprint(f"[backend][qwen1][lora][warn] local lightning load failed: {e}")
         if not loaded:
             try:
-                pipe.load_lora_weights("lightx2v/Qwen-Image-Lightning", weight_name=LIGHTNING_LORA_FILENAME)
-                self._current_lightning = f"hf:{LIGHTNING_LORA_FILENAME}"
+                pipe.load_lora_weights("lightx2v/Qwen-Image-Lightning", weight_name=QWEN_LIGHTNING_LORA_FILENAME)
+                self._current_lightning = f"hf:{QWEN_LIGHTNING_LORA_FILENAME}"
                 loaded = True
             except Exception as e:
                 _vprint(f"[backend][qwen1][lora][warn] HF fallback failed: {e}")
@@ -634,11 +618,11 @@ class QwenEdit1Backend(Backend):
             _log_step("Lightning LoRA loaded", start_time, torch_mod)
 
     def _load_additional_loras(self, pipe, start_time, torch_mod):
-        if not ADDITIONAL_LORAS:
+        if not QWEN_ADDITIONAL_LORAS:
             return
         loaded_names: List[str] = []
-        for fname in ADDITIONAL_LORAS:
-            full = os.path.join(ADDITIONAL_LORA_DIR, fname)
+        for fname in QWEN_ADDITIONAL_LORAS:
+            full = os.path.join(QWEN_ADDITIONAL_LORA_DIR, fname)
             if not os.path.isfile(full):
                 _vprint(f"[backend][qwen1][lora][extra][miss] {full}")
                 continue

@@ -9,8 +9,14 @@ from werkzeug.serving import WSGIRequestHandler
 # Set QUIET_HTTP_LOG = True to suppress ALL request lines.
 # Set QUIET_PROGRESS_ONLY = True to suppress only /progress/* polling lines.
 # Both False => normal logging.
-QUIET_HTTP_LOG = False
-QUIET_PROGRESS_ONLY = True
+
+try:
+    from .qtdConstants import QTD_QUIET_HTTP_LOG, QTD_QUIET_PROGRESS_ONLY, QTD_SERVER_HOST, QTD_SERVER_PORT  # type: ignore
+except ImportError:
+    from qtdConstants import QTD_QUIET_HTTP_LOG, QTD_QUIET_PROGRESS_ONLY, QTD_SERVER_HOST, QTD_SERVER_PORT  # type: ignore
+
+QUIET_HTTP_LOG = QTD_QUIET_HTTP_LOG
+QUIET_PROGRESS_ONLY = QTD_QUIET_PROGRESS_ONLY
 
 # import debugpy
 # debugpy.listen(("localhost", 5678))  # You can change the port if needed
@@ -243,8 +249,8 @@ def api_events(job_id: str):
 
 if __name__ == "__main__":
     import os
-    host = os.environ.get("QTD_HOST", "127.0.0.1")
-    port = int(os.environ.get("QTD_PORT", "5015"))
+    host = QTD_SERVER_HOST
+    port = QTD_SERVER_PORT
     print(f"[qtd][startup] host={host} port={port}")
     rebuild_model_index()
     if QUIET_HTTP_LOG:

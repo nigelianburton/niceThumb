@@ -28,6 +28,14 @@ try:
         make_diffusers_progress_callback,  # kept (not used now but retained for compatibility)
         sanitize_adapter_name,
     )
+    from .qtdConstants import (  # type: ignore
+        SDXL_MODEL_PATH,
+        SDXL_MODELS_DIR,
+        SDXL_LORAS_DIR,
+        SDXL_NEG_PROMPT,
+        SDXL_DEFAULT_STEPS,
+        SDXL_DEFAULT_CFG,
+    )
 except ImportError:
     from qtdHelpers import (
         list_safetensors,
@@ -40,6 +48,14 @@ except ImportError:
         compute_sdxl_size,
         make_diffusers_progress_callback,
         sanitize_adapter_name,
+    )
+    from qtdConstants import (
+        SDXL_MODEL_PATH,
+        SDXL_MODELS_DIR,
+        SDXL_LORAS_DIR,
+        SDXL_NEG_PROMPT,
+        SDXL_DEFAULT_STEPS,
+        SDXL_DEFAULT_CFG,
     )
 
 
@@ -58,20 +74,13 @@ class SDXLBackend(Backend):
     _current_adapter_names_text: List[str] = []
     _current_adapter_names_i2i: List[str] = []
 
-    _MODEL_PATH = os.environ.get("NT6_SDXL_MODEL", r"C:\_MODELS-SD\StableDiffusion\juggernautXL_ragnarokBy.safetensors")
-    _SD_MODELS_DIR = os.environ.get("NT6_SDXL_DIR", r"C:\_MODELS-SD\StableDiffusion")
-    _LORAS_DIR = os.environ.get("NT6_LORAS_DIR", r"C:\_MODELS-SD\Lora")
-    _NEG_PROMPT = os.environ.get("NT6_NEG_PROMPT", "blurry, lowres, deformed, extra limbs, bad anatomy, watermark, text")
-    _DEFAULT_STEPS = int(os.environ.get("NT6_STEPS", "30"))
-    _DEFAULT_CFG = float(os.environ.get("NT6_CFG", "7.5"))
-
     # ----------------- Public -----------------
     def describe_models(self) -> List[Dict[str, Any]]:
         models: List[Dict[str, Any]] = []
-        for name in list_safetensors(self._SD_MODELS_DIR):
+        for name in list_safetensors(SDXL_MODELS_DIR):
             models.append(self._model_descriptor(name))
-        if not models and isinstance(self._MODEL_PATH, str) and self._MODEL_PATH.strip():
-            bn = os.path.basename(self._MODEL_PATH)
+        if not models and isinstance(SDXL_MODEL_PATH, str) and SDXL_MODEL_PATH.strip():
+            bn = os.path.basename(SDXL_MODEL_PATH)
             models.append(self._model_descriptor(bn))
         return models
 
@@ -117,8 +126,8 @@ class SDXLBackend(Backend):
     def list_loras(self, model_id: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         try:
-            for f in list_safetensors(self._LORAS_DIR):
-                full = os.path.join(self._LORAS_DIR, f)
+            for f in list_safetensors(SDXL_LORAS_DIR):
+                full = os.path.join(SDXL_LORAS_DIR, f)
                 out.append({"name": f, "path": full, "tags": ["sdxl"]})
         except Exception:
             pass
@@ -152,12 +161,12 @@ class SDXLBackend(Backend):
             prompt = (inputs or {}).get("prompt") or ""
             req_w = int((inputs or {}).get("width") or 1024)
             req_h = int((inputs or {}).get("height") or 1024)
-            steps = int((inputs or {}).get("num_inference_steps") or self._DEFAULT_STEPS)
-            guidance = float((inputs or {}).get("guidance_scale") or self._DEFAULT_CFG)
+            steps = int((inputs or {}).get("num_inference_steps") or SDXL_DEFAULT_STEPS)
+            guidance = float((inputs or {}).get("guidance_scale") or SDXL_DEFAULT_CFG)
             seed = seed_from_inputs(inputs or {})
             # Use the requested dimensions directly, bypassing compute_sdxl_size.
             width, height = req_w, req_h
-            lora_paths = resolve_lora_list(loras or [], self._LORAS_DIR)
+            lora_paths = resolve_lora_list(loras or [], SDXL_LORAS_DIR)
 
             # Stage 0..10: model / pipeline preparation
             base_loaded = (self._pipe_text if op == "t2i" else self._pipe_i2i) is not None
@@ -204,7 +213,7 @@ class SDXLBackend(Backend):
             if op == "t2i":
                 call_kwargs = dict(
                     prompt=prompt,
-                    negative_prompt=self._NEG_PROMPT,
+                    negative_prompt=SDXL_NEG_PROMPT,
                     width=width,
                     height=height,
                     num_inference_steps=steps,
@@ -256,7 +265,7 @@ class SDXLBackend(Backend):
                     pin.set_progress_bar_config(disable=True)
                     inpaint_kwargs = dict(
                         prompt=prompt,
-                        negative_prompt=self._NEG_PROMPT,
+                        negative_prompt=SDXL_NEG_PROMPT,
                         image=init_img,
                         strength=max(0.0, min(1.0, strength)),
                         num_inference_steps=steps,
@@ -282,7 +291,7 @@ class SDXLBackend(Backend):
             if out_img is None:
                 call_kwargs = dict(
                     prompt=prompt,
-                    negative_prompt=self._NEG_PROMPT,
+                    negative_prompt=SDXL_NEG_PROMPT,
                     image=init_img,
                     strength=max(0.0, min(1.0, strength)),
                     num_inference_steps=steps,
@@ -339,14 +348,14 @@ class SDXLBackend(Backend):
     def _model_file_from_id(self, model_id: str) -> str:
         if isinstance(model_id, str) and model_id.startswith("sdxl:"):
             return model_id.split(":", 1)[1]
-        return os.path.basename(self._MODEL_PATH or "")
+        return os.path.basename(SDXL_MODEL_PATH or "")
 
     def _model_dir(self) -> str:
-        return os.path.dirname(self._MODEL_PATH) if self._MODEL_PATH else (self._SD_MODELS_DIR or "")
+        return os.path.dirname(SDXL_MODEL_PATH) if SDXL_MODEL_PATH else (SDXL_MODELS_DIR or "")
 
     def _resolve_model_path(self, model_file: str) -> str:
         if not model_file:
-            return self._MODEL_PATH
+            return SDXL_MODEL_PATH
         if os.path.isabs(model_file) and os.path.exists(model_file):
             return model_file
         return os.path.join(self._model_dir(), model_file)
