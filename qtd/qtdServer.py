@@ -88,8 +88,108 @@ def ping():
     })
 
 
+@app.route("/get_sdxl_models")
+def get_sdxl_models():
+    """Get SDXL models from the StableDiffusion directory"""
+    try:
+        sdxl_backend = BACKENDS.get("sdxl")
+        if not sdxl_backend:
+            return jsonify({"models": []})
+        models = sdxl_backend.describe_models()
+        return jsonify({"models": models})
+    except Exception:
+        print("[qtd][sdxl_models][error] Failed to get SDXL models:")
+        traceback.print_exc()
+        return jsonify({"models": []})
+
+
+@app.route("/get_sdxl_loras")
+def get_sdxl_loras():
+    """Get SDXL LoRAs from the Lora directory"""
+    try:
+        from .qtdConstants import SDXL_LORA
+        from .qtdHelpers import list_safetensors
+        loras = []
+        for f in list_safetensors(SDXL_LORA):
+            loras.append(f)
+        return jsonify({"loras": loras})
+    except ImportError:
+        from qtdConstants import SDXL_LORA
+        from qtdHelpers import list_safetensors
+        loras = []
+        for f in list_safetensors(SDXL_LORA):
+            loras.append(f)
+        return jsonify({"loras": loras})
+    except Exception:
+        print("[qtd][sdxl_loras][error] Failed to get SDXL LoRAs:")
+        traceback.print_exc()
+        return jsonify({"loras": []})
+
+
+@app.route("/get_qwen_models")
+def get_qwen_models():
+    """Get Qwen models from the QwenModels directory"""
+    try:
+        qwen_backend = BACKENDS.get("qwen1")
+        if not qwen_backend:
+            return jsonify({"models": []})
+        models = qwen_backend.describe_models()
+        return jsonify({"models": models})
+    except Exception:
+        print("[qtd][qwen_models][error] Failed to get Qwen models:")
+        traceback.print_exc()
+        return jsonify({"models": []})
+
+
+@app.route("/get_qwen_loras")
+def get_qwen_loras():
+    """Get Qwen LoRAs from the QwenLora directory"""
+    try:
+        from .qtdConstants import QWEN_LORA
+        from .qtdHelpers import list_safetensors
+        loras = []
+        for f in list_safetensors(QWEN_LORA):
+            loras.append(f)
+        return jsonify({"loras": loras})
+    except ImportError:
+        from qtdConstants import QWEN_LORA
+        from qtdHelpers import list_safetensors
+        loras = []
+        for f in list_safetensors(QWEN_LORA):
+            loras.append(f)
+        return jsonify({"loras": loras})
+    except Exception:
+        print("[qtd][qwen_loras][error] Failed to get Qwen LoRAs:")
+        traceback.print_exc()
+        return jsonify({"loras": []})
+
+
+@app.route("/get_qwen_speedup_loras")
+def get_qwen_speedup_loras():
+    """Get Qwen speedup LoRAs from the QwenLightning directory"""
+    try:
+        from .qtdConstants import QWEN_SPEEDUP_LORAS
+        from .qtdHelpers import list_safetensors
+        loras = []
+        for f in list_safetensors(QWEN_SPEEDUP_LORAS):
+            loras.append(f)
+        return jsonify({"loras": loras})
+    except ImportError:
+        from qtdConstants import QWEN_SPEEDUP_LORAS
+        from qtdHelpers import list_safetensors
+        loras = []
+        for f in list_safetensors(QWEN_SPEEDUP_LORAS):
+            loras.append(f)
+        return jsonify({"loras": loras})
+    except Exception:
+        print("[qtd][qwen_speedup_loras][error] Failed to get Qwen speedup LoRAs:")
+        traceback.print_exc()
+        return jsonify({"loras": []})
+
+
 @app.route("/models")
 def models():
+    """Legacy endpoint - returns all models from all backends"""
     out = []
     for b in BACKENDS.values():
         try:
@@ -114,6 +214,7 @@ def _loras_as_names(loras_raw):
 
 @app.route("/loras")
 def loras():
+    """Legacy endpoint - returns LoRAs for specific modelId"""
     model_id = request.args.get("modelId", "")
     backend_id = MODEL_INDEX.get(model_id, "")
     b = BACKENDS.get(backend_id)
